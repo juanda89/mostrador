@@ -34,18 +34,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return new Response("Bad Request", { status: 400 });
   }
 
-  // Procesar asíncrono: respondemos 200 al toque y dejamos que el handler
-  // corra en background con EdgeRuntime.waitUntil().
-  // deno-lint-ignore no-explicit-any
-  const runtime: any = (globalThis as any).EdgeRuntime;
-  const work = handleKapsoEvent(payload).catch((err) =>
-    log.error("handler_failed", { err: String(err) })
-  );
-  if (runtime?.waitUntil) {
-    runtime.waitUntil(work);
-  } else {
-    queueMicrotask(() => work);
+  // Procesamos sincrónicamente y devolvemos 200 después. Kapso aguanta ~30s y
+  // nuestro handler típicamente toma 3-12s (Opus + tools + WhatsApp send).
+  // La idempotencia (whatsapp_message_id UNIQUE) protege contra retries.
+  try {
+    await handleKapsoEvent(payload);
+  } catch (err) {
+    log.error("handler_failed", { err: String(err) });
+    // Aún así devolvemos 200 para que Kapso no nos siga reintentando con el mismo mensaje.
   }
-
   return new Response("ok", { status: 200 });
 });

@@ -9,6 +9,8 @@ import { log } from "../lib/log.ts";
 import { toE164 } from "../lib/phone.ts";
 import { sendWhatsAppText, fetchKapsoMedia } from "../lib/whatsapp.ts";
 import { transcribeAudio } from "../media/whisper.ts";
+import { extractMenu } from "../media/gemini.ts";
+import { runOnboardingAgent } from "./onboarding/agent.ts";
 import type {
   Business,
   ContentType,
@@ -271,16 +273,37 @@ async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedConten
         return emptyAudio();
       }
     }
-    case "image":
-      // Fase 4: pasar por Gemini. Por ahora solo registramos el caption.
+    case "image": {
+      // Extracción de menú con Gemini (útil durante onboarding cuando el dueño
+      // manda una foto del menú). Si falla, fallback al caption.
+      const mediaUrl = msg.kapso?.media_url ?? msg.kapso?.media_data?.url ?? null;
+      const captionHint = msg.image?.caption ?? "";
+      let extractedText = captionHint || "[imagen]";
+
+      if (mediaUrl) {
+        try {
+          const blob = await fetchKapsoMedia(msg.image?.id ?? "");
+          const result = await extractMenu(blob);
+          const lines = result.lines
+            .map((l) => l.price ? `- ${l.name} — $${l.price}` : `- ${l.name}`)
+            .join("\n");
+          extractedText = lines
+            ? `[Foto de menú extraída]\n${lines}\n${captionHint ? `(Nota del dueño: ${captionHint})` : ""}`.trim()
+            : `[Imagen recibida, no se pudo extraer texto]${captionHint ? `\nNota: ${captionHint}` : ""}`;
+        } catch (err) {
+          log.error("image_extract_failed", { err: String(err) });
+        }
+      }
+
       return {
-        userText: msg.image?.caption ?? "[imagen]",
+        userText: extractedText,
         contentType: "image",
         mediaUrl: msg.image?.id ?? null,
         lat: null,
         lng: null,
         transcript: null,
       };
+    }
     case "location":
       return {
         userText: "[ubicación]",
@@ -349,32 +372,69 @@ interface RouteArgs {
 }
 
 async function route(args: RouteArgs): Promise<string> {
-  const { business, memberships, userText } = args;
+  const { user, business, memberships, userText, inboundMessage } = args;
 
-  // Sin negocio asociado → bienvenida + crear business en onboarding.
+  // CASO 1: Sin business → nuevo dueño potencial. Arrancamos onboarding.
+  // El agente creará el business cuando tenga el nombre.
   if (!business) {
-    // STUB Fase 2: handler de nuevo dueño. Por ahora respondemos saludo simple.
-    return (
-      "¡Hola! Soy Mostrador, el asistente de tu negocio. " +
-      "Pronto te voy a ayudar a llevar ventas, inventario y reportes. " +
-      "(Configuración aún en desarrollo.)"
-    );
+    const reply = await runOnboardingAgent({
+      user,
+      business: null,
+      inboundMessage,
+      userText,
+    });
+    // Si el agente acabó de crear un business durante este turn, asociamos
+    // retroactivamente este mensaje y los previos sin business_id al nuevo.
+    await retroactivelyLinkMessages(user.id);
+    return reply;
   }
 
   const isOwner = memberships.some(
     (m) => m.business_id === business.id && m.role === "owner",
   );
+  const isSeller = memberships.some(
+    (m) => m.business_id === business.id && m.role === "seller",
+  );
 
+  // CASO 2: Onboarding en curso, escribe el owner.
   if (business.state === "onboarding") {
     if (isOwner) {
-      // STUB Fase 2: runOnboardingAgent.
-      return `Estoy configurando "${business.name}". Eco: ${userText}`;
+      return await runOnboardingAgent({ user, business, inboundMessage, userText });
     }
-    return "El dueño todavía está configurando el negocio. Te aviso cuando esté listo.";
+    if (isSeller) {
+      return "El dueño todavía está configurando el negocio. Te aviso cuando esté listo.";
+    }
+    return "Tu número no está asociado a ningún negocio. Pídele al dueño que te agregue.";
   }
 
-  // production
+  // CASO 3: Producción. Por ahora stub — Fase 3 implementará production agent.
   // STUB Fase 3: runProductionAgent.
   const role = isOwner ? "dueño" : "vendedor";
   return `[${business.name} · modo ${role}] Eco: ${userText}`;
+}
+
+/**
+ * Cuando el dueño manda su primer mensaje (sin business) y el agente acaba de
+ * crear el business durante el turn, hay mensajes con business_id=NULL que
+ * deberían asociarse al business recién creado. Esto los conecta.
+ */
+async function retroactivelyLinkMessages(userId: string): Promise<void> {
+  const supabase = db();
+  // Buscar el business del que este user es owner
+  const { data: ownership } = await supabase
+    .from("business_members")
+    .select("business_id")
+    .eq("user_id", userId)
+    .eq("role", "owner")
+    .eq("active", true)
+    .limit(1)
+    .maybeSingle();
+  if (!ownership) return;
+  const businessId = (ownership as any).business_id;
+
+  await supabase
+    .from("messages")
+    .update({ business_id: businessId })
+    .eq("user_id", userId)
+    .is("business_id", null);
 }
