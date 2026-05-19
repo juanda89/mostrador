@@ -32,19 +32,40 @@ interface KapsoIncomingMessage {
   audio?: { id: string; mime_type?: string };
   image?: { id: string; mime_type?: string; caption?: string };
   location?: { latitude: number; longitude: number; name?: string; address?: string };
-  /** Kapso agrega un objeto enriquecido con cosas como direction, status, transcript */
+  /** Kapso v2 agrega un objeto enriquecido. */
   kapso?: {
     direction?: "inbound" | "outbound";
     status?: string;
+    processing_status?: string;
+    origin?: string;
+    has_media?: boolean;
     content?: string;
-    transcript?: string;             // ¡Kapso transcribe audio automáticamente!
+    /** v2: transcript de audio ya hecho por Kapso */
+    transcript?: { text?: string };
+    /** v2: URL directa al media (audio/image) */
+    media_url?: string;
+    media_data?: {
+      url?: string;
+      filename?: string;
+      content_type?: string;
+      byte_size?: number;
+    };
   };
 }
 
-interface KapsoWebhookPayload {
+interface KapsoEventItem {
   message?: KapsoIncomingMessage;
-  conversation?: { id: string };
+  conversation?: { id: string; phone_number?: string; kapso?: { contact_name?: string } };
   phone_number_id?: string;
+  is_new_conversation?: boolean;
+}
+
+interface KapsoWebhookPayload extends KapsoEventItem {
+  // Kapso v2 con buffer_enabled=true viene así:
+  type?: string;
+  batch?: boolean;
+  data?: KapsoEventItem[];
+  batch_info?: { size: number; window_ms: number; conversation_id?: string };
 }
 
 // =========================================================================
@@ -52,11 +73,37 @@ interface KapsoWebhookPayload {
 // =========================================================================
 export async function handleKapsoEvent(payload: unknown): Promise<void> {
   const p = payload as KapsoWebhookPayload;
-  if (!p?.message) {
-    log.debug("ignoring_non_message_event");
+
+  // Solo nos interesan los mensajes recibidos. Ignoramos sent/delivered/read/etc.
+  if (p?.type && p.type !== "whatsapp.message.received") {
+    log.debug("ignoring_event_type", { type: p.type });
     return;
   }
-  const msg = p.message;
+
+  // Si viene en formato batch (buffer_enabled), iterar sobre data[].
+  // Si viene sin batch (no buffereado), procesar el payload directo.
+  const items: KapsoEventItem[] = p.batch && Array.isArray(p.data)
+    ? p.data
+    : (p.message ? [p as KapsoEventItem] : []);
+
+  if (items.length === 0) {
+    log.info("payload_without_messages", { keys: Object.keys(p ?? {}) });
+    return;
+  }
+
+  for (const item of items) {
+    await processSingleMessage(item).catch((err) =>
+      log.error("process_single_message_failed", { err: String(err), wa_id: item.message?.id })
+    );
+  }
+}
+
+async function processSingleMessage(item: KapsoEventItem): Promise<void> {
+  if (!item.message) {
+    log.debug("item_without_message");
+    return;
+  }
+  const msg = item.message;
 
   // Ignorar mensajes outbound (echos del propio sistema).
   if (msg.kapso?.direction === "outbound") {
@@ -194,15 +241,16 @@ async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedConten
         transcript: null,
       };
     case "audio": {
-      // Si Kapso ya transcribió, usamos eso y ahorramos Whisper.
-      if (msg.kapso?.transcript) {
+      // Si Kapso ya transcribió (v2), usamos eso y ahorramos Whisper.
+      const kapsoTranscript = msg.kapso?.transcript?.text?.trim();
+      if (kapsoTranscript) {
         return {
-          userText: msg.kapso.transcript,
+          userText: kapsoTranscript,
           contentType: "audio",
-          mediaUrl: msg.audio?.id ?? null,
+          mediaUrl: msg.kapso?.media_url ?? msg.audio?.id ?? null,
           lat: null,
           lng: null,
-          transcript: msg.kapso.transcript,
+          transcript: kapsoTranscript,
         };
       }
       // Fallback: descargar el blob y mandar a Whisper.
