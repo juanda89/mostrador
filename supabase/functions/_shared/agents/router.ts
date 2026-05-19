@@ -97,6 +97,22 @@ export async function handleKapsoEvent(payload: unknown): Promise<void> {
     return;
   }
 
+  // ---- Comando especial: "reset" (case-insensitive, sólo texto) ----
+  // Si todos los items del batch son la palabra "reset" exact, limpiamos
+  // el estado del usuario y devolvemos un mensaje de confirmación.
+  // Útil para iterar en pruebas sin tener que hacer cleanup manual en DB.
+  const isResetCommand =
+    items.length >= 1 &&
+    items.every(
+      (it) =>
+        it.message?.type === "text" &&
+        it.message?.text?.body?.trim().toLowerCase() === "reset",
+    );
+  if (isResetCommand && items[0]?.message?.from) {
+    await handleResetCommand(items[0].message.from, items[items.length - 1].message!.id);
+    return;
+  }
+
   // ---- Fase 1: ingest de todos los items del batch (rápido, en serie) ----
   // Persistimos los inbounds primero. Idempotencia por whatsapp_message_id.
   type Ingested = {
@@ -266,6 +282,56 @@ async function ingestItem(item: KapsoEventItem): Promise<{
   });
 
   return { user, msg, userText, inboundRecord };
+}
+
+/**
+ * Maneja el comando especial "reset" del usuario: limpia COMPLETAMENTE su
+ * estado (negocios propios, productos, mensajes, etc.) y le devuelve un
+ * mensaje de confirmación para que empiece de nuevo.
+ *
+ * Pensado como herramienta de pruebas/iteración. El user del WhatsApp queda
+ * en la tabla `users` (no se borra), pero su `name` se limpia y todos sus
+ * negocios + datos asociados se eliminan en cascada.
+ */
+async function handleResetCommand(fromPhone: string, wamid: string): Promise<void> {
+  const supabase = db();
+  const phone = toE164(fromPhone);
+  const user = await upsertUserByPhone(phone);
+
+  log.info("reset_command_received", { user_id: user.id, phone });
+
+  // Borrar en el orden correcto (FKs):
+  //   1. messages (FK a users)
+  //   2. business_members (FK a users)
+  //   3. businesses (ON DELETE CASCADE limpia settings, checklist, products,
+  //                  ingredients, locations, etc.)
+  //   4. users.name → NULL (no borramos el row, solo el nombre)
+  await supabase.from("messages").delete().eq("user_id", user.id);
+  await supabase.from("business_members").delete().eq("user_id", user.id);
+  await supabase.from("businesses").delete().eq("owner_user_id", user.id);
+  await supabase.from("users").update({ name: null }).eq("id", user.id);
+
+  // Mandar confirmación + nuevo saludo
+  const replyText = "✅ Reset hecho. Empezamos de cero — mándame *hola* para arrancar.";
+  let sentId: string | null = null;
+  try {
+    const sent = await sendWhatsAppText(phone, replyText);
+    sentId = sent.messages?.[0]?.id ?? sent.id ?? null;
+  } catch (err) {
+    log.error("reset_reply_send_failed", { err: String(err) });
+  }
+
+  // Persistir el outbound (el inbound "reset" ya se borró en el delete de arriba).
+  // Persistimos el outbound como un mensaje sin business_id (porque ya no hay).
+  await supabase.from("messages").insert({
+    user_id: user.id,
+    business_id: null,
+    direction: "outbound",
+    content_type: "text",
+    raw_text: replyText,
+    whatsapp_message_id: sentId,
+    tool_calls: { reset: true, triggered_by_wamid: wamid },
+  });
 }
 
 /**

@@ -505,8 +505,7 @@ Si dice sí ("dale", "claro", "listo", "obvio", "ok"):
   4. Cierra ese mismo mensaje con:
      "Puedes ajustar lo que quieras. Ejemplos: 'quítale el tomate a la
      hamburguesa', 'la salchicha es de 40g no 50g', 'el perro lleva ripio
-     de papa también'. Las salsas no las puse — esas se agregan después si
-     las quieres trackear."
+     de papa también'."
 
 ### CIERRE DEL WOW (cuando confirme que las recetas están bien)
 
