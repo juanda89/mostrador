@@ -135,45 +135,76 @@ async function processSingleMessage(item: KapsoEventItem): Promise<void> {
   const user = await upsertUserByPhone(phone);
 
   // 3. Procesar media → texto.
-  const { userText, contentType, mediaUrl, lat, lng, transcript } = await resolveContent(msg);
+  const { userText, contentType, mediaUrl, lat, lng, transcript, extractedData } =
+    await resolveContent(msg);
 
   // 4. Resolver contexto de negocio.
   const memberships = await loadActiveMemberships(user.id);
   const business = await resolveBusiness(memberships);
 
   // 5. Insertar mensaje inbound.
+  // raw_text se llena con la representación textual EFECTIVA del mensaje del
+  // usuario (texto original, transcripción de audio o extracción de imagen).
+  // Esto garantiza que el agente vea contexto completo al cargar historial.
   const inboundMessage = await insertInboundMessage({
     business_id: business?.id ?? null,
     user_id: user.id,
     content_type: contentType,
-    raw_text: msg.text?.body ?? null,
+    raw_text: userText || null,
     media_url: mediaUrl,
     transcript,
+    extracted_data: extractedData,
     latitude: lat,
     longitude: lng,
     whatsapp_message_id: msg.id,
   });
 
   // 6. Routing.
-  const reply = await route({ user, business, memberships, userText, inboundMessage });
+  const routed = await route({ user, business, memberships, userText, inboundMessage });
 
-  // 7. Enviar respuesta + persistir outbound.
-  if (reply) {
+  // 7. Re-leer business POR SI el agente lo acabó de crear durante este turn.
+  //    Esto evita persistir el outbound con business_id=NULL cuando ya existe.
+  const finalBusinessId = await resolveCurrentBusinessId(user.id, business?.id ?? null);
+
+  // 8. Enviar respuesta + persistir outbound.
+  if (routed.text) {
+    let sentId: string | null = null;
     try {
-      const sent = await sendWhatsAppText(phone, reply);
-      const sentId = sent.messages?.[0]?.id ?? sent.id ?? null;
-      await supabase.from("messages").insert({
-        business_id: business?.id ?? null,
-        user_id: user.id,
-        direction: "outbound",
-        content_type: "text",
-        raw_text: reply,
-        whatsapp_message_id: sentId,
-      });
+      const sent = await sendWhatsAppText(phone, routed.text);
+      sentId = sent.messages?.[0]?.id ?? sent.id ?? null;
     } catch (err) {
       log.error("outbound_send_failed", { err: String(err) });
     }
+    // Persistir outbound aunque el send haya fallado (para tener registro completo).
+    await supabase.from("messages").insert({
+      business_id: finalBusinessId,
+      user_id: user.id,
+      direction: "outbound",
+      content_type: "text",
+      raw_text: routed.text,
+      whatsapp_message_id: sentId,
+      tool_calls: routed.traces ?? null,
+    });
   }
+}
+
+/**
+ * Devuelve el business_id efectivo del usuario al cierre del turn. Si el agente
+ * creó un business durante este turn, esta query lo detecta.
+ */
+async function resolveCurrentBusinessId(
+  userId: string,
+  fallback: string | null,
+): Promise<string | null> {
+  const { data } = await db()
+    .from("business_members")
+    .select("business_id")
+    .eq("user_id", userId)
+    .eq("active", true)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return (data as { business_id?: string } | null)?.business_id ?? fallback;
 }
 
 // =========================================================================
@@ -223,12 +254,17 @@ async function resolveBusiness(memberships: Membership[]): Promise<Business | nu
 }
 
 interface ResolvedContent {
+  /** Representación textual del mensaje del usuario lista para el agente. */
   userText: string;
   contentType: ContentType;
+  /** ID o URL del media (referencia, no para descargar de nuevo). */
   mediaUrl: string | null;
   lat: number | null;
   lng: number | null;
+  /** Para audio: transcripción. Para text/image/location: null. */
   transcript: string | null;
+  /** Para image: el JSON estructurado de Gemini con líneas y precios. */
+  extractedData: unknown | null;
 }
 
 async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedContent> {
@@ -241,6 +277,7 @@ async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedConten
         lat: null,
         lng: null,
         transcript: null,
+        extractedData: null,
       };
     case "audio": {
       // Si Kapso ya transcribió (v2), usamos eso y ahorramos Whisper.
@@ -253,6 +290,7 @@ async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedConten
           lat: null,
           lng: null,
           transcript: kapsoTranscript,
+          extractedData: null,
         };
       }
       // Fallback: descargar el blob y mandar a Whisper.
@@ -267,51 +305,63 @@ async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedConten
           lat: null,
           lng: null,
           transcript: text,
+          extractedData: null,
         };
       } catch (err) {
-        log.error("audio_transcription_failed", { err: String(err) });
+        log.error("audio_transcription_failed", { err: String(err), audio_id: msg.audio.id });
         return emptyAudio();
       }
     }
     case "image": {
-      // Extracción de menú con Gemini (útil durante onboarding cuando el dueño
-      // manda una foto del menú). Si falla, fallback al caption.
-      const mediaUrl = msg.kapso?.media_url ?? msg.kapso?.media_data?.url ?? null;
+      // Extracción de menú con Gemini. Tenemos imagen si tenemos image.id.
+      // El media_url solo viene poblado a veces; siempre podemos descargar por id.
+      const imageId = msg.image?.id;
       const captionHint = msg.image?.caption ?? "";
-      let extractedText = captionHint || "[imagen]";
+      let extractedText = captionHint ? `[Imagen recibida]\nNota del dueño: ${captionHint}` : "[Imagen recibida]";
+      let extractedData: unknown = null;
 
-      if (mediaUrl) {
+      if (imageId) {
         try {
-          const blob = await fetchKapsoMedia(msg.image?.id ?? "");
+          const blob = await fetchKapsoMedia(imageId);
           const result = await extractMenu(blob);
+          extractedData = result;
           const lines = result.lines
-            .map((l) => l.price ? `- ${l.name} — $${l.price}` : `- ${l.name}`)
+            .map((l) => l.price ? `- ${l.name} — $${l.price}` : `- ${l.name} (sin precio)`)
             .join("\n");
           extractedText = lines
-            ? `[Foto de menú extraída]\n${lines}\n${captionHint ? `(Nota del dueño: ${captionHint})` : ""}`.trim()
-            : `[Imagen recibida, no se pudo extraer texto]${captionHint ? `\nNota: ${captionHint}` : ""}`;
+            ? `[Foto de menú extraída por OCR]\n${lines}${captionHint ? `\nNota del dueño: ${captionHint}` : ""}`
+            : extractedText;
+          log.info("image_extracted", {
+            image_id: imageId,
+            lines: result.lines.length,
+            vendor: result.vendor_name,
+          });
         } catch (err) {
-          log.error("image_extract_failed", { err: String(err) });
+          log.error("image_extract_failed", { err: String(err), image_id: imageId });
         }
+      } else {
+        log.warn("image_without_id", { msg_id: msg.id });
       }
 
       return {
         userText: extractedText,
         contentType: "image",
-        mediaUrl: msg.image?.id ?? null,
+        mediaUrl: imageId ?? null,
         lat: null,
         lng: null,
         transcript: null,
+        extractedData,
       };
     }
     case "location":
       return {
-        userText: "[ubicación]",
+        userText: `[Ubicación enviada: lat=${msg.location?.latitude}, lng=${msg.location?.longitude}]`,
         contentType: "location",
         mediaUrl: null,
         lat: msg.location?.latitude ?? null,
         lng: msg.location?.longitude ?? null,
         transcript: null,
+        extractedData: null,
       };
     default:
       return {
@@ -321,6 +371,7 @@ async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedConten
         lat: null,
         lng: null,
         transcript: null,
+        extractedData: null,
       };
   }
 }
@@ -333,6 +384,7 @@ function emptyAudio(): ResolvedContent {
     lat: null,
     lng: null,
     transcript: null,
+    extractedData: null,
   };
 }
 
@@ -343,6 +395,7 @@ interface InsertInboundArgs {
   raw_text: string | null;
   media_url: string | null;
   transcript: string | null;
+  extracted_data: unknown | null;
   latitude: number | null;
   longitude: number | null;
   whatsapp_message_id: string;
@@ -371,22 +424,27 @@ interface RouteArgs {
   inboundMessage: MessageRecord;
 }
 
-async function route(args: RouteArgs): Promise<string> {
+interface RouteResult {
+  text: string;
+  /** Traces del agente si vino de un agent loop; sirve para persistir tool_calls. */
+  traces?: unknown[];
+}
+
+async function route(args: RouteArgs): Promise<RouteResult> {
   const { user, business, memberships, userText, inboundMessage } = args;
 
   // CASO 1: Sin business → nuevo dueño potencial. Arrancamos onboarding.
-  // El agente creará el business cuando tenga el nombre.
   if (!business) {
-    const reply = await runOnboardingAgent({
+    const result = await runOnboardingAgent({
       user,
       business: null,
       inboundMessage,
       userText,
     });
     // Si el agente acabó de crear un business durante este turn, asociamos
-    // retroactivamente este mensaje y los previos sin business_id al nuevo.
+    // retroactivamente los mensajes previos sin business_id al nuevo.
     await retroactivelyLinkMessages(user.id);
-    return reply;
+    return { text: result.text, traces: result.traces };
   }
 
   const isOwner = memberships.some(
@@ -399,18 +457,18 @@ async function route(args: RouteArgs): Promise<string> {
   // CASO 2: Onboarding en curso, escribe el owner.
   if (business.state === "onboarding") {
     if (isOwner) {
-      return await runOnboardingAgent({ user, business, inboundMessage, userText });
+      const result = await runOnboardingAgent({ user, business, inboundMessage, userText });
+      return { text: result.text, traces: result.traces };
     }
     if (isSeller) {
-      return "El dueño todavía está configurando el negocio. Te aviso cuando esté listo.";
+      return { text: "El dueño todavía está configurando el negocio. Te aviso cuando esté listo." };
     }
-    return "Tu número no está asociado a ningún negocio. Pídele al dueño que te agregue.";
+    return { text: "Tu número no está asociado a ningún negocio. Pídele al dueño que te agregue." };
   }
 
-  // CASO 3: Producción. Por ahora stub — Fase 3 implementará production agent.
-  // STUB Fase 3: runProductionAgent.
+  // CASO 3: Producción. Stub — Fase 3 implementará production agent.
   const role = isOwner ? "dueño" : "vendedor";
-  return `[${business.name} · modo ${role}] Eco: ${userText}`;
+  return { text: `[${business.name} · modo ${role}] Eco: ${userText}` };
 }
 
 /**
