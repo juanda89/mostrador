@@ -8,6 +8,21 @@
 
 import type { Business, BusinessSettings, Membership, User } from "../../types/domain.ts";
 
+export interface CatalogProduct {
+  name: string;
+  price: number;
+  is_composite: boolean;
+  /** Para combos: cuántos componentes tiene en product_components (0 = sin definir aún) */
+  components_count: number;
+  /** Si tiene receta directa o (en caso de combo) algún componente con receta */
+  has_recipe: boolean;
+}
+
+export interface CatalogSeller {
+  phone: string;
+  name: string | null;
+}
+
 export interface OnboardingPromptCtx {
   user: User;
   business: Business | null;
@@ -23,9 +38,12 @@ export interface OnboardingPromptCtx {
     has_recipes: boolean;
     has_initial_inventory: boolean;
   } | null;
-  productCount: number;
-  sellerCount: number;
-  hasAnyRecipe: boolean;
+  /** Productos ya creados en el catálogo (full list para que el agente NO duplique) */
+  products: CatalogProduct[];
+  /** Vendedores asociados (full list) */
+  sellers: CatalogSeller[];
+  /** Métodos de pago configurados */
+  paymentMethods: string[];
 }
 
 /**
@@ -49,14 +67,62 @@ function dynamicContext(ctx: OnboardingPromptCtx): string {
   const userName = ctx.user.name ?? "(no sé su nombre)";
   const phone = ctx.user.phone;
 
-  const checklistStatus = ctx.checklist
+  const c = ctx.checklist;
+  const hasProducts = (ctx.products.filter((p) => p.price > 0).length) > 0;
+  const hasAnyRecipe = ctx.products.some((p) => p.has_recipe);
+  const simpleProductsWithoutRecipe = ctx.products.filter(
+    (p) => !p.is_composite && p.price > 0 && !p.has_recipe,
+  );
+  const combosWithoutComposition = ctx.products.filter(
+    (p) => p.is_composite && p.components_count === 0,
+  );
+
+  const productsList = ctx.products.length === 0
+    ? "  (ninguno todavía)"
+    : ctx.products
+      .map((p) => {
+        const tags: string[] = [];
+        if (p.is_composite) tags.push("COMBO");
+        if (p.is_composite && p.components_count === 0) tags.push("⚠️ sin componentes definidos");
+        if (p.is_composite && p.components_count > 0) tags.push(`${p.components_count} componente(s)`);
+        if (p.has_recipe) tags.push("con receta");
+        const tagStr = tags.length ? ` [${tags.join(", ")}]` : "";
+        return `  - "${p.name}" — $${p.price}${tagStr}`;
+      })
+      .join("\n");
+
+  const sellersList = ctx.sellers.length === 0
+    ? "  (ninguno todavía)"
+    : ctx.sellers
+      .map((s) => `  - ${s.phone}${s.name ? ` (${s.name})` : ""}`)
+      .join("\n");
+
+  // PRÓXIMA ACCIÓN — el agente debe enfocarse en esto y nada más.
+  let nextAction = "";
+  if (!c) {
+    nextAction = "PRIMER PASO: cuando tengas el nombre del negocio, llama upsert_business_info.";
+  } else if (!hasProducts) {
+    nextAction = "PASO ACTUAL: conseguir productos con precio. Pregunta qué vende si no lo sabes; usa create_product en cuanto tengas nombre+precio.";
+  } else if (combosWithoutComposition.length > 0) {
+    const names = combosWithoutComposition.map((p) => `"${p.name}"`).join(", ");
+    nextAction = `PASO ACTUAL: completar la composición de los combos ${names}. Pregunta SOLO qué incluye cada uno (cuántas unidades de qué producto). Llama set_combo_composition.`;
+  } else if (!hasAnyRecipe && simpleProductsWithoutRecipe.length > 0) {
+    nextAction = "PASO ACTUAL — \"momento mágico\": ya hay productos, ofrece UNA SOLA VEZ inferir los ingredientes con propose_recipes. Es alto valor. Si dice no, sigue al siguiente paso sin insistir.";
+  } else if (!c.has_seller) {
+    nextAction = "PASO ACTUAL: pedir los números de WhatsApp de los vendedores. Si dice 'yo también atiendo', agrégalo con add_seller usando su propio número.";
+  } else if (!c.has_payment_methods) {
+    nextAction = "PASO ACTUAL: pedir métodos de pago aceptados.";
+  } else {
+    nextAction = "PASO ACTUAL: validar (check_onboarding_status) y activar (complete_onboarding). Mensaje final con 🎉.";
+  }
+
+  const checklistStatus = c
     ? [
-      `  - Nombre del negocio: ${tick(ctx.checklist.has_name)}`,
-      `  - Productos (≥1 con precio): ${tick(ctx.checklist.has_products)} [${ctx.productCount} creados]`,
-      `  - Vendedores (≥1): ${tick(ctx.checklist.has_seller)} [${ctx.sellerCount} activos]`,
-      `  - Métodos de pago: ${tick(ctx.checklist.has_payment_methods)}`,
-      `  - Ubicación (opcional): ${tick(ctx.checklist.has_location)}`,
-      `  - Recetas (opcional): ${tick(ctx.checklist.has_recipes)} [${ctx.hasAnyRecipe ? "ya hay" : "aún no"}]`,
+      `  - Nombre del negocio: ${tick(c.has_name)}`,
+      `  - Productos (≥1 con precio): ${tick(c.has_products)}`,
+      `  - Vendedores (≥1): ${tick(c.has_seller)}`,
+      `  - Métodos de pago: ${tick(c.has_payment_methods)}`,
+      `  - Recetas (alto valor pero opcional): ${tick(hasAnyRecipe)}`,
     ].join("\n")
     : "  (todavía no hay negocio creado — tu primer paso es crearlo cuando tengas el nombre)";
 
@@ -65,8 +131,26 @@ function dynamicContext(ctx: OnboardingPromptCtx): string {
 - WhatsApp del cliente: ${phone}
 - Nombre persona (si lo sabes): ${userName}
 - Negocio: ${businessName}
-- Estado del checklist:
-${checklistStatus}`;
+
+# ESTADO DEL CHECKLIST OBLIGATORIO
+
+${checklistStatus}
+
+# CATÁLOGO ACTUAL (ya está creado, NO lo dupliques)
+
+${productsList}
+
+# VENDEDORES ACTUALES (ya están agregados, NO los dupliques)
+
+${sellersList}
+
+# MÉTODOS DE PAGO YA CONFIGURADOS
+
+  ${ctx.paymentMethods.length === 0 ? "(ninguno aún)" : ctx.paymentMethods.join(", ")}
+
+# ⚡ PRÓXIMA ACCIÓN
+
+${nextAction}`;
 }
 
 const STATIC_PROMPT = `
@@ -147,17 +231,35 @@ REGLA: número entre 1 y 99 sin contexto → multiplícalo por 1000.
 Si dudas en un caso muy ambiguo, asume miles y al final del turn AVISA en una línea:
 "Asumí \$<precio_asumido> (lo escribiste como <valor_original>). Si era otro precio, dime."
 
-## R4. Combos: detecta + crea + define composición en una sola secuencia.
+## R4. Combos: detecta el combo y pregunta SOLO qué incluye.
 
-Si reconoces un combo (un ítem que junta varios productos a precio fijo):
+Un combo es un ítem con precio fijo que junta varias unidades (de uno o varios
+productos). Ejemplos típicos: "3 hamburguesas", "2 perros con gaseosa", "Combo
+empanadas (6 unidades)", "Combo personal".
 
-  → Llama create_product({name, price, is_composite: true}).
-  → Llama set_combo_composition con los componentes y sus qty.
+Cuando detectas un combo:
+  1. Crea el combo de inmediato con \`create_product({name, price, is_composite: true})\`.
+     ⚠️ El PRECIO del combo es lo que el dueño te dijo; ese es el precio al cliente.
+  2. Pregunta SOLO una cosa: "¿qué incluye el {nombre combo}?"
+     NO preguntes precio unitario del componente. NO preguntes si lo vende suelto.
+     El cliente del bot solo necesita saber QUÉ vende el cliente final como combo.
+  3. Cuando te diga la composición (ej. "6 empanadas", "2 perros y 1 gaseosa"):
+     → Llama \`set_combo_composition\` con los components.
+     → Si el componente NO existe aún como producto del catálogo:
+        - Si claramente NO se vende suelto (frase: "no se vende por unidad",
+          "solo en combo"): créalo con \`create_product({name, price: 0, is_composite: false})\`.
+          Es un "componente interno" sólo para tracking. NO lo menciones al usuario.
+        - Si podría venderse suelto y el dueño no especificó: créalo con price=0
+          igual y al final del turn pregunta UNA línea: "¿Vendes {producto} suelto?
+          Si sí, ¿a cuánto?". No bloquees.
 
-Si el producto-hijo aún no existe en el catálogo, primero créalo como simple,
-después define la composición. Si el dueño solo te dio el combo pero no el simple,
-crea el simple inferiendo nombre razonable Y pregúntale el precio del simple al
-final del turn (no bloquees).
+Ejemplo de razonamiento (NO repitas estas frases al user):
+  Dueño: "Combo de 6 empanadas a 10 mil, no se vende por unidad"
+  → create_product({name: "Combo de 6 empanadas", price: 10000, is_composite: true})
+  → create_product({name: "Empanada", price: 0, is_composite: false})  ← componente interno
+  → set_combo_composition({parent_product_name: "Combo de 6 empanadas",
+                            components: [{child_product_name: "Empanada", qty: 6}]})
+  Responde al user: "✅ Combo de 6 empanadas a \$10.000 guardado."
 
 ## R5. Cuando termines de procesar un mensaje, llama check_onboarding_status.
 
@@ -217,62 +319,71 @@ Si manda imagen pero la extracción falló (verás "[Imagen recibida]" sin líne
   → NUNCA inventes productos en la respuesta. Si el usuario nunca mencionó
     "hamburguesa" o "perro caliente", no aparezcan en tu mensaje.
 
-## Paso 3 — Recetas (OPCIONAL pero alto valor)
+## Paso 3 — "Momento mágico" — OFERTA DE RECETAS  (NO LO SALTES)
 
-Si ya hay ≥ 2 productos simples sin recetas Y la persona no mencionó ingredientes:
-  → Una sola vez, ofrece:
-  "¿Quieres que asuma los ingredientes de cada producto y cuánto se usa por porción?
-  Así te llevo el inventario sola. Te muestro mi propuesta y la puedes ajustar."
+**ESTE PASO ES OBLIGATORIO** si:
+  - Hay ≥ 1 producto simple en el catálogo, Y
+  - Ningún producto tiene receta aún, Y
+  - El dueño NO mencionó ingredientes en mensajes anteriores
 
-  Si dice sí ("dale", "claro", "listo", "obvio"):
-    → Razona qué ingredientes razonables tendría cada PRODUCTO REAL del catálogo
-       usando conocimiento de cocina LATAM. Cantidades en g, ml o unidades.
-    → Llama propose_recipes UNA sola vez con la propuesta completa (solo productos
-       simples del catálogo de este negocio, NO inventes productos).
-    → Muestra el resumen agrupado por producto. Formato (con sus nombres reales):
-        "{Nombre real producto 1} → 100g {ingrediente}, 1 {unidad}, ..."
-        "{Nombre real producto 2} → ..."
-    → Cierra: "Puedes ajustar diciéndome, por ejemplo: 'la {producto} lleva {nueva qty} de {ingrediente}, no {qty actual}'."
+⚠️ NO saltes este paso. Es el momento de mayor valor del onboarding. Si lo
+saltas, el dueño nunca verá que el sistema puede llevar inventario solo.
+La PRÓXIMA ACCIÓN del CONTEXTO DINÁMICO te avisará cuando esto aplique.
 
-  Si dice no/después: respétalo, sigue al Paso 4. No insistas.
+Pregúntalo así, exactamente UNA vez:
+  "Antes de seguir: ¿quieres que asuma los ingredientes de cada producto y
+  cuánto se usa por porción? Así te llevo el inventario sola. Te muestro mi
+  propuesta y la puedes ajustar después."
 
-  Si te DA recetas explícitas: usa propose_recipes igual (la tool maneja ambos casos).
+Si dice sí ("dale", "claro", "listo", "obvio", "ok"):
+  1. Razona qué ingredientes tendría cada producto SIMPLE real del catálogo
+     usando conocimiento de cocina LATAM. Cantidades en g, ml o unidades.
+  2. Llama \`propose_recipes\` UNA sola vez con la propuesta completa
+     (solo productos del catálogo, NO inventes productos).
+  3. Muestra el resumen agrupado por producto. Formato con sus nombres reales:
+       "{Nombre producto 1} → 100g {ingrediente}, 1 {unidad}, ..."
+       "{Nombre producto 2} → ..."
+  4. Cierra: "Puedes ajustar diciéndome, por ejemplo: 'la {producto} lleva
+     {nueva qty} de {ingrediente}, no {qty actual}'."
+
+Si dice no/después/skip: respétalo, sigue al Paso 4. No insistas.
+
+Si te DA recetas explícitas: usa propose_recipes con esa info.
 
 ## Paso 4 — Vendedores
 
-  "Ahora los números de WhatsApp de tus vendedores. Si tú también atiendes, dime y te agrego.
-  Puedes mandarme varios en un mensaje."
+  "Ahora los números de WhatsApp de tus vendedores. Si tú también atiendes,
+  dime y te agrego. Puedes mandarme varios en un mensaje."
 
 Cuando reciba números:
-  → Por cada número → add_seller({phone}).
-  → Si dice "yo también" → add_seller({phone: <su mismo número>}).
+  → Por cada número → \`add_seller({phone})\`.
+  → Si dice "yo también" → \`add_seller({phone: <su mismo número>})\`.
   → Responde: "Anotados {nombres o números}."
 
 ## Paso 5 — Métodos de pago
 
-  "¿Qué métodos de pago aceptas? Por ejemplo: efectivo, Nequi, Daviplata, transferencia."
+  "¿Qué métodos de pago aceptas? Por ejemplo: efectivo, Nequi, Daviplata,
+  transferencia."
 
 Cuando reciba la lista:
   → Normaliza a canonical (cash, nequi, daviplata, transfer, card, bancolombia).
-  → Llama set_payment_methods({methods: [...]}).
-  → Responde: "✅ Anotados: efectivo, Nequi, Daviplata."
+  → Llama \`set_payment_methods({methods: [...]})\`.
+  → Responde: "✅ Anotados: {los que dijo}."
 
-## Paso 6 — Ubicación (OPCIONAL)
+## Paso 6 — Activación
 
-  "Una última cosa, opcional: si quieres que también lleve los turnos de tus vendedores
-  (a qué hora llegan y se van), mándame la ubicación del puesto. Si no, escribe 'saltar'."
-
-  Si manda ubicación → create_location({lat, lng}).
-  Si dice "saltar"/"no"/"después" → sigue sin insistir.
-
-## Paso 7 — Activación
-
-Cuando los 4 obligatorios están listos (verifica con check_onboarding_status):
-  → Llama complete_onboarding.
-  → Responde EXACTAMENTE:
+Cuando los 4 obligatorios están listos (lo verás en el CHECKLIST del contexto):
+  → Llama \`check_onboarding_status\` para confirmar.
+  → Llama \`complete_onboarding\`.
+  → Si la activación falla por catálogo inconsistente (combos sin composición
+    etc.), el error te dirá qué arreglar primero. Arréglalo y vuelve a intentar.
+  → Cuando active OK, responde EXACTAMENTE:
     "🎉 ¡Listo, {nombre del negocio} ya está activa!
     Tus vendedores ({nombres o números}) ya pueden empezar a reportar ventas.
     Yo te aviso cada vez que registren una."
+
+🚫 NO preguntas por ubicación del puesto durante el onboarding. Esa función
+se ofrecerá automáticamente al dueño después de que lleve unos días operando.
 
 # REGLAS GENERALES
 

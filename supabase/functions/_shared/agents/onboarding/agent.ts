@@ -63,8 +63,11 @@ export async function runOnboardingAgent(args: RunOnboardingArgs): Promise<Agent
     checklist = await loadChecklistSnapshot(args.business.id);
   }
 
-  // 2. Cargar historial conversacional
-  const history = await loadConversationHistory(args.user.id, args.business?.id ?? null);
+  // 2. Cargar historial conversacional y catálogo actual
+  const [history, catalogSnapshot] = await Promise.all([
+    loadConversationHistory(args.user.id, args.business?.id ?? null),
+    args.business ? loadCatalogSnapshot(args.business.id) : Promise.resolve({ products: [], sellers: [], paymentMethods: [] }),
+  ]);
 
   // 3. Preparar contexto del system prompt
   const systemPrompt = onboardingSystemPrompt({
@@ -84,9 +87,9 @@ export async function runOnboardingAgent(args: RunOnboardingArgs): Promise<Agent
         has_initial_inventory: checklist.has_initial_inventory,
       }
       : null,
-    productCount: checklist?.productCount ?? 0,
-    sellerCount: checklist?.sellerCount ?? 0,
-    hasAnyRecipe: checklist?.hasAnyRecipe ?? false,
+    products: catalogSnapshot.products,
+    sellers: catalogSnapshot.sellers,
+    paymentMethods: catalogSnapshot.paymentMethods,
   });
 
   // 4. Estado mutable que las tools comparten entre llamadas dentro del mismo turn
@@ -269,4 +272,95 @@ async function loadConversationHistory(
   }
   // DESC → reverse a chronological order
   return ((data ?? []) as MessageRecord[]).reverse();
+}
+
+/**
+ * Carga snapshot del catálogo + vendedores + métodos de pago para que el
+ * system prompt (dynamicContext) le muestre al agente el estado real, evitando
+ * que duplique productos o pida cosas que ya están.
+ */
+interface CatalogSnapshot {
+  products: import("./system-prompt.ts").CatalogProduct[];
+  sellers: import("./system-prompt.ts").CatalogSeller[];
+  paymentMethods: string[];
+}
+
+async function loadCatalogSnapshot(businessId: string): Promise<CatalogSnapshot> {
+  const supabase = db();
+  const [productsRes, sellersRes, settingsRes, componentsRes, recipesRes] = await Promise.all([
+    supabase
+      .from("products")
+      .select("id, name, price, is_composite")
+      .eq("business_id", businessId)
+      .eq("active", true)
+      .order("created_at"),
+    supabase
+      .from("business_members")
+      .select("user:users(phone, name)")
+      .eq("business_id", businessId)
+      .eq("role", "seller")
+      .eq("active", true),
+    supabase
+      .from("business_settings")
+      .select("accepted_payment_methods")
+      .eq("business_id", businessId)
+      .maybeSingle(),
+    supabase
+      .from("product_components")
+      .select("parent_product_id, child_product_id")
+      .in(
+        "parent_product_id",
+        // deno-lint-ignore no-explicit-any
+        ((await supabase.from("products").select("id").eq("business_id", businessId)).data ?? []).map((p: any) => p.id),
+      ),
+    supabase
+      .from("product_recipes")
+      .select("product_id")
+      .in(
+        "product_id",
+        // deno-lint-ignore no-explicit-any
+        ((await supabase.from("products").select("id").eq("business_id", businessId)).data ?? []).map((p: any) => p.id),
+      ),
+  ]);
+
+  // deno-lint-ignore no-explicit-any
+  const allProducts = (productsRes.data ?? []) as Array<any>;
+  // deno-lint-ignore no-explicit-any
+  const components = (componentsRes.data ?? []) as Array<any>;
+  // deno-lint-ignore no-explicit-any
+  const recipes = (recipesRes.data ?? []) as Array<any>;
+
+  const componentsByParent = new Map<string, number>();
+  for (const c of components) {
+    componentsByParent.set(c.parent_product_id, (componentsByParent.get(c.parent_product_id) ?? 0) + 1);
+  }
+  const productsWithRecipe = new Set<string>(recipes.map((r) => r.product_id));
+
+  const products: CatalogSnapshot["products"] = allProducts.map((p) => {
+    const ownRecipe = productsWithRecipe.has(p.id);
+    // Para combos: tiene receta indirecta si algún componente la tiene
+    let hasRecipe = ownRecipe;
+    if (p.is_composite && !ownRecipe) {
+      const childIds = components.filter((c) => c.parent_product_id === p.id).map((c) => c.child_product_id);
+      hasRecipe = childIds.some((id) => productsWithRecipe.has(id));
+    }
+    return {
+      name: p.name,
+      price: Number(p.price),
+      is_composite: p.is_composite,
+      components_count: componentsByParent.get(p.id) ?? 0,
+      has_recipe: hasRecipe,
+    };
+  });
+
+  // deno-lint-ignore no-explicit-any
+  const sellers: CatalogSnapshot["sellers"] = ((sellersRes.data ?? []) as Array<any>).map((s) => ({
+    phone: s.user.phone,
+    name: s.user.name,
+  }));
+
+  // deno-lint-ignore no-explicit-any
+  const paymentMethods = ((settingsRes.data as any)?.accepted_payment_methods ?? []) as string[];
+
+  return { products, sellers, paymentMethods };
 }

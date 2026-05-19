@@ -145,22 +145,22 @@ const upsertBusinessInfo: ToolDef = {
 };
 
 // =========================================================================
-// 2. create_product
+// 2. create_product  (IDEMPOTENTE: case-insensitive por business+name)
 // =========================================================================
 const createProduct: ToolDef = {
   schema: {
     name: "create_product",
     description:
-      "Crea un producto del catálogo. Llamar UNA vez por producto. Si es un combo (junta varios productos a precio fijo), pasar is_composite=true y después llamar set_combo_composition para definir qué incluye.",
+      "Crea o actualiza un producto del catálogo. IDEMPOTENTE: si ya existe un producto con el mismo nombre (case-insensitive) en este negocio, actualiza su precio si difiere, sin duplicar. price=0 es válido para componentes internos de combos (productos no vendibles por separado).",
     input_schema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Nombre del producto tal como lo dijo el dueño." },
-        price: { type: "number", description: "Precio al cliente final, número entero en la currency del negocio (no incluir símbolo)." },
+        price: { type: "number", description: "Precio al cliente final, entero en COP (sin símbolo). Usar 0 para componentes internos de combos que no se venden sueltos." },
         sku: { type: "string", description: "Identificador interno opcional." },
         is_composite: {
           type: "boolean",
-          description: "true si es un combo (junta otros productos). Default false.",
+          description: "true si es un combo. Default false. Si true, llamar después set_combo_composition.",
         },
       },
       required: ["name", "price"],
@@ -169,11 +169,56 @@ const createProduct: ToolDef = {
   handler: async (input, ctx) => {
     const r = requireBusiness(ctx);
     if (!r.ok) return r;
-    const { error, data } = await db()
+    if (typeof input.price !== "number" || input.price < 0) {
+      return { ok: false, error: "El precio debe ser un número ≥ 0." };
+    }
+    const supabase = db();
+    const trimmedName = input.name.trim();
+
+    // Buscar producto existente con el mismo nombre (case-insensitive).
+    const { data: existing } = await supabase
+      .from("products")
+      .select("id, name, price, is_composite, active")
+      .eq("business_id", r.business.id)
+      .ilike("name", trimmedName)
+      .maybeSingle();
+
+    if (existing) {
+      // Idempotente: si el precio o is_composite difieren, los actualizamos.
+      const e = existing as any;
+      const needsUpdate =
+        Number(e.price) !== input.price ||
+        Boolean(e.is_composite) !== Boolean(input.is_composite ?? false) ||
+        !e.active;
+      if (needsUpdate) {
+        await supabase
+          .from("products")
+          .update({
+            price: input.price,
+            is_composite: input.is_composite ?? e.is_composite,
+            active: true,
+          })
+          .eq("id", e.id);
+      }
+      // Marcar checklist solo si hay al menos 1 producto vendible (price > 0).
+      if (input.price > 0) {
+        await supabase
+          .from("onboarding_checklist")
+          .update({ has_products: true })
+          .eq("business_id", r.business.id);
+      }
+      return {
+        ok: true,
+        data: { id: e.id, name: e.name, price: input.price, is_composite: input.is_composite ?? e.is_composite, _existed: true },
+      };
+    }
+
+    // No existía → crear nuevo.
+    const { error, data } = await supabase
       .from("products")
       .insert({
         business_id: r.business.id,
-        name: input.name.trim(),
+        name: trimmedName,
         price: input.price,
         sku: input.sku ?? null,
         is_composite: input.is_composite ?? false,
@@ -181,10 +226,12 @@ const createProduct: ToolDef = {
       .select("id, name, price, is_composite")
       .single();
     if (error) return { ok: false, error: error.message };
-    await db()
-      .from("onboarding_checklist")
-      .update({ has_products: true })
-      .eq("business_id", r.business.id);
+    if (input.price > 0) {
+      await supabase
+        .from("onboarding_checklist")
+        .update({ has_products: true })
+        .eq("business_id", r.business.id);
+    }
     return { ok: true, data };
   },
 };
@@ -234,27 +281,55 @@ const setComboComposition: ToolDef = {
       return { ok: false, error: `No encontré el combo "${input.parent_product_name}". Créalo primero con create_product({is_composite: true}).` };
     }
 
+    // Asegurar que el parent esté marcado como composite.
+    if (!(parent as any).is_composite) {
+      await supabase.from("products").update({ is_composite: true }).eq("id", (parent as any).id);
+    }
+
     for (const c of input.components) {
-      const { data: child } = await supabase
+      // Resolver el child. Si no existe, crearlo como componente interno
+      // (active=false, price=0). Esto permite combos cuyo componente no se
+      // vende suelto sin saturar el catálogo con un producto vendible.
+      let child;
+      const childName = c.child_product_name.trim();
+      const { data: foundChild } = await supabase
         .from("products")
         .select("id")
         .eq("business_id", r.business.id)
-        .ilike("name", c.child_product_name.trim())
+        .ilike("name", childName)
         .maybeSingle();
-      if (!child) {
-        return {
-          ok: false,
-          error: `No encontré el componente "${c.child_product_name}". Créalo primero con create_product({is_composite: false}).`,
-        };
+      if (foundChild) {
+        child = foundChild;
+      } else {
+        const { data: createdChild, error: cErr } = await supabase
+          .from("products")
+          .insert({
+            business_id: r.business.id,
+            name: childName,
+            price: 0,
+            is_composite: false,
+            active: false, // No vendible directamente
+          })
+          .select("id")
+          .single();
+        if (cErr) return { ok: false, error: `No pude crear componente interno "${childName}": ${cErr.message}` };
+        child = createdChild;
       }
-      const { error: linkErr } = await supabase.from("product_components").insert({
-        parent_product_id: parent.id,
-        child_product_id: child.id,
-        qty: c.qty,
-      });
+
+      // Upsert composición (UNIQUE parent_product_id+child_product_id).
+      const { error: linkErr } = await supabase
+        .from("product_components")
+        .upsert(
+          {
+            parent_product_id: (parent as any).id,
+            child_product_id: (child as any).id,
+            qty: c.qty,
+          },
+          { onConflict: "parent_product_id,child_product_id" },
+        );
       if (linkErr) return { ok: false, error: linkErr.message };
     }
-    return { ok: true, data: { parent_product_id: parent.id, components_added: input.components.length } };
+    return { ok: true, data: { parent_product_id: (parent as any).id, components_added: input.components.length } };
   },
 };
 
@@ -710,21 +785,76 @@ const completeOnboarding: ToolDef = {
     if (!r.ok) return r;
     const supabase = db();
 
-    // Verificar checklist antes de activar
+    // 1. Verificar checklist obligatorio
     const { data: checklist } = await supabase
       .from("onboarding_checklist")
       .select("has_name, has_products, has_seller, has_payment_methods")
       .eq("business_id", r.business.id)
       .single();
     const c = checklist as any;
-    const ready = c?.has_name && c?.has_products && c?.has_seller && c?.has_payment_methods;
-    if (!ready) {
+    const missing: string[] = [];
+    if (!c?.has_name) missing.push("nombre del negocio");
+    if (!c?.has_products) missing.push("al menos un producto con precio");
+    if (!c?.has_seller) missing.push("al menos un vendedor");
+    if (!c?.has_payment_methods) missing.push("métodos de pago");
+    if (missing.length > 0) {
       return {
         ok: false,
-        error: "No puedo activar todavía: faltan obligatorios. Llama check_onboarding_status para saber cuáles.",
+        error: `No puedo activar todavía: falta ${missing.join(", ")}. Completa eso primero.`,
       };
     }
 
+    // 2. Validar consistencia del catálogo (no activar con datos rotos).
+    const { data: products } = await supabase
+      .from("products")
+      .select("id, name, price, is_composite, active")
+      .eq("business_id", r.business.id);
+    const allProducts = (products ?? []) as any[];
+
+    // 2a. Al menos un producto VENDIBLE (active=true, price>0).
+    const sellable = allProducts.filter((p) => p.active && Number(p.price) > 0);
+    if (sellable.length === 0) {
+      return {
+        ok: false,
+        error: "No hay productos vendibles con precio. Agrega al menos uno antes de activar.",
+      };
+    }
+
+    // 2b. Todo combo debe tener composición.
+    const composites = allProducts.filter((p) => p.is_composite);
+    if (composites.length > 0) {
+      const compositeIds = composites.map((p) => p.id);
+      const { data: comps } = await supabase
+        .from("product_components")
+        .select("parent_product_id")
+        .in("parent_product_id", compositeIds);
+      const haveComposition = new Set((comps ?? []).map((cc: any) => cc.parent_product_id));
+      const empty = composites.filter((p) => !haveComposition.has(p.id));
+      if (empty.length > 0) {
+        const names = empty.map((p) => `"${p.name}"`).join(", ");
+        return {
+          ok: false,
+          error: `Los combos ${names} no tienen componentes definidos. Llama set_combo_composition para cada uno antes de activar.`,
+        };
+      }
+    }
+
+    // 2c. Detectar duplicados case-insensitive.
+    const seen = new Set<string>();
+    const dups: string[] = [];
+    for (const p of allProducts.filter((pp) => pp.active)) {
+      const key = String(p.name).toLowerCase().trim();
+      if (seen.has(key)) dups.push(p.name);
+      seen.add(key);
+    }
+    if (dups.length > 0) {
+      return {
+        ok: false,
+        error: `Hay productos duplicados: ${dups.join(", ")}. Esto no debería pasar — avísame para investigar.`,
+      };
+    }
+
+    // 3. Activar
     const { data: updated, error } = await supabase
       .from("businesses")
       .update({ state: "production", activated_at: new Date().toISOString() })

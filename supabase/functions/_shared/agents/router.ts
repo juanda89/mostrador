@@ -493,9 +493,17 @@ async function route(args: RouteArgs): Promise<RouteResult> {
     return { text: "Tu número no está asociado a ningún negocio. Pídele al dueño que te agregue." };
   }
 
-  // CASO 3: Producción. Stub — Fase 3 implementará production agent.
-  const role = isOwner ? "dueño" : "vendedor";
-  return { text: `[${business.name} · modo ${role}] Eco: ${userText}` };
+  // CASO 3: Producción.
+  // STUB temporal: el production agent (Fase 3 del plan) está en backlog.
+  // Mientras tanto respondemos con un mensaje honesto, no con un eco debug.
+  if (isOwner) {
+    return {
+      text: "Tu negocio ya está activo. Estoy terminando de habilitar el reporte de ventas y las notificaciones — te aviso cuando estén listas. Mientras tanto, cualquier duda dime.",
+    };
+  }
+  return {
+    text: "Tu negocio ya está activo. Estoy terminando de habilitar el reporte de ventas; pronto podrás registrar las tuyas hablándome.",
+  };
 }
 
 /**
