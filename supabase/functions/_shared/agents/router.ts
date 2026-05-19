@@ -155,25 +155,47 @@ export async function handleKapsoEvent(payload: unknown): Promise<void> {
   // Re-leer business POR SI el agente lo acabó de crear durante este turn.
   const finalBusinessId = await resolveCurrentBusinessId(lastUser.id, business?.id ?? null);
 
-  // Enviar la ÚNICA respuesta del turn + persistir outbound.
+  // Enviar respuesta(s) del turn + persistir outbound(s).
+  // El agente puede dividir su respuesta en varios bubbles consecutivos
+  // usando el marcador "[[NEXT_MSG]]". Cada parte se envía como un mensaje
+  // independiente y se persiste como un outbound separado.
   if (routed.text) {
-    let sentId: string | null = null;
-    try {
-      const sent = await sendWhatsAppText(lastUser.phone, routed.text);
-      sentId = sent.messages?.[0]?.id ?? sent.id ?? null;
-    } catch (err) {
-      log.error("outbound_send_failed", { err: String(err) });
+    const parts = splitOutbound(routed.text);
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      let sentId: string | null = null;
+      try {
+        const sent = await sendWhatsAppText(lastUser.phone, part);
+        sentId = sent.messages?.[0]?.id ?? sent.id ?? null;
+      } catch (err) {
+        log.error("outbound_send_failed", { err: String(err), part_index: i });
+      }
+      await supabase.from("messages").insert({
+        business_id: finalBusinessId,
+        user_id: lastUser.id,
+        direction: "outbound",
+        content_type: "text",
+        raw_text: part,
+        whatsapp_message_id: sentId,
+        // Solo el ÚLTIMO outbound del turn lleva las traces del agente
+        // (para que toda la conversación tenga una sola entrada de tool_calls
+        // por turn del agente). Las partes anteriores van con tool_calls=null.
+        tool_calls: i === parts.length - 1 ? (routed.traces ?? null) : null,
+      });
     }
-    await supabase.from("messages").insert({
-      business_id: finalBusinessId,
-      user_id: lastUser.id,
-      direction: "outbound",
-      content_type: "text",
-      raw_text: routed.text,
-      whatsapp_message_id: sentId,
-      tool_calls: routed.traces ?? null,
-    });
   }
+}
+
+/**
+ * Divide el texto de respuesta del agente en bubbles WhatsApp separados,
+ * usando el marcador "[[NEXT_MSG]]". El marcador se descarta del output.
+ * Cada parte se trim-ea para evitar espacios sobrantes.
+ */
+function splitOutbound(text: string): string[] {
+  return text
+    .split(/\s*\[\[NEXT_MSG\]\]\s*/g)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 /**

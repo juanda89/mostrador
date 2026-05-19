@@ -74,11 +74,12 @@ const upsertBusinessInfo: ToolDef = {
   schema: {
     name: "upsert_business_info",
     description:
-      "Crea el negocio o actualiza su nombre. Llamar como PRIMERA acción cuando aún no existe negocio. La currency y timezone se infieren del país por el número del owner; no las pidas.",
+      "Crea el negocio o actualiza sus datos. Llamar como PRIMERA acción cuando aún no existe negocio. Acepta opcionalmente el nombre del DUEÑO (owner_name) para guardarlo en su perfil. La currency y timezone se infieren del país por el número del owner; no las pidas.",
     input_schema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Nombre del negocio tal como lo dijo el dueño." },
+        owner_name: { type: "string", description: "Nombre de la persona dueña, si lo mencionó (ej. 'María', 'Don Carlos'). Opcional." },
         timezone: { type: "string", description: "Opcional; si la persona explícitamente menciona otra ciudad/país, úsala (ej. America/Mexico_City)." },
         currency: { type: "string", description: "Opcional; código ISO 4217 (ej. MXN, ARS). Solo si dijo otro país." },
       },
@@ -90,6 +91,15 @@ const upsertBusinessInfo: ToolDef = {
     const locale = inferLocaleFromPhone(ctx.user.phone);
     const timezone = input.timezone ?? locale.timezone;
     const currency = input.currency ?? locale.currency;
+
+    // Si nos dieron el nombre del dueño, guardarlo en users.name (no sobrescribir si ya existe).
+    if (input.owner_name && !ctx.user.name) {
+      await supabase
+        .from("users")
+        .update({ name: input.owner_name.trim() })
+        .eq("id", ctx.user.id);
+      ctx.user.name = input.owner_name.trim();
+    }
 
     // Si ya tenía un business en onboarding, actualizar el nombre.
     if (ctx.state.business) {
@@ -103,10 +113,13 @@ const upsertBusinessInfo: ToolDef = {
         .update({ has_name: true })
         .eq("business_id", ctx.state.business.id);
       await ctx.refreshBusiness();
-      return { ok: true, data: { business_id: ctx.state.business.id, name: input.name } };
+      return {
+        ok: true,
+        data: { business_id: ctx.state.business.id, name: input.name, owner_name: ctx.user.name },
+      };
     }
 
-    // Crear business + settings + checklist + owner membership + seller membership (autoagrega owner).
+    // Crear business + settings + checklist + owner membership.
     const { data: created, error: createErr } = await supabase
       .from("businesses")
       .insert({
@@ -136,6 +149,7 @@ const upsertBusinessInfo: ToolDef = {
       data: {
         business_id: businessId,
         name: input.name,
+        owner_name: ctx.user.name,
         timezone,
         currency,
         inferred_from_phone: !input.timezone && !input.currency,
