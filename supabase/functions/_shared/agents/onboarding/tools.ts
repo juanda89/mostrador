@@ -524,7 +524,7 @@ const proposeRecipes: ToolDef = {
 const updateRecipe: ToolDef = {
   schema: {
     name: "update_recipe",
-    description: "Ajusta la cantidad de un ingrediente en la receta de un producto (ej. 'la de carne lleva 100g no 80').",
+    description: "Ajusta la cantidad de un ingrediente en la receta de un producto (ej. 'la de carne lleva 100g no 80'). Devuelve la receta COMPLETA del producto post-update + el valor anterior del ingrediente que cambió, para que puedas mostrar la receta completa al usuario (siempre debes hacerlo, no solo confirmar el cambio).",
     input_schema: {
       type: "object",
       properties: {
@@ -541,18 +541,28 @@ const updateRecipe: ToolDef = {
     const supabase = db();
     const { data: product } = await supabase
       .from("products")
-      .select("id")
+      .select("id, name")
       .eq("business_id", r.business.id)
       .ilike("name", input.product_name.trim())
       .maybeSingle();
     if (!product) return { ok: false, error: `No encontré el producto "${input.product_name}".` };
     const { data: ingredient } = await supabase
       .from("ingredients")
-      .select("id")
+      .select("id, name, unit")
       .eq("business_id", r.business.id)
       .ilike("name", input.ingredient_name.trim())
       .maybeSingle();
     if (!ingredient) return { ok: false, error: `No encontré el ingrediente "${input.ingredient_name}".` };
+
+    // Capturar el valor anterior antes del upsert (para que el agente lo muestre).
+    const { data: prevRecipe } = await supabase
+      .from("product_recipes")
+      .select("qty_per_unit")
+      .eq("product_id", (product as any).id)
+      .eq("ingredient_id", (ingredient as any).id)
+      .maybeSingle();
+    const previous_qty = prevRecipe ? Number((prevRecipe as any).qty_per_unit) : null;
+
     const { error } = await supabase
       .from("product_recipes")
       .upsert(
@@ -564,7 +574,29 @@ const updateRecipe: ToolDef = {
         { onConflict: "product_id,ingredient_id" },
       );
     if (error) return { ok: false, error: error.message };
-    return { ok: true };
+
+    // Devolver la receta COMPLETA del producto post-update, así el agente
+    // puede mostrársela al usuario para verificación visual.
+    const { data: fullRecipe } = await supabase
+      .from("product_recipes")
+      .select("qty_per_unit, ingredient:ingredients(name, unit)")
+      .eq("product_id", (product as any).id);
+    const ingredients = (fullRecipe ?? []).map((row: any) => ({
+      name: row.ingredient?.name,
+      unit: row.ingredient?.unit,
+      qty_per_unit: Number(row.qty_per_unit),
+    }));
+
+    return {
+      ok: true,
+      data: {
+        product_name: (product as any).name,
+        changed_ingredient: (ingredient as any).name,
+        new_qty: input.qty_per_unit,
+        previous_qty,
+        recipe: ingredients,
+      },
+    };
   },
 };
 
