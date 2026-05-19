@@ -1,0 +1,58 @@
+# Supabase project configuration.
+# Docs: https://supabase.com/docs/guides/local-development/cli/config
+
+project_id = "mostrador"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[db.pooler]
+enabled = false
+port = 54329
+pool_mode = "transaction"
+default_pool_size = 20
+max_client_conn = 100
+
+[studio]
+enabled = true
+port = 54323
+api_url = "http://127.0.0.1"
+
+[inbucket]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+additional_redirect_urls = ["https://127.0.0.1:3000"]
+jwt_expiry = 3600
+enable_signup = true
+
+[edge_runtime]
+enabled = true
+policy = "oneshot"
+inspector_port = 8083
+
+# --- Function-specific config ---
+[functions.whatsapp-webhook]
+verify_jwt = false   # Kapso no manda JWT de Supabase. La autenticidad se valida con HMAC propio.
+
+[functions.cron-tick]
+verify_jwt = false   # Validamos con header x-cron-secret.
+
+[analytics]
+enabled = false

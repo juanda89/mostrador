@@ -1,0 +1,34 @@
+# Env
+.env
+.env.local
+.env.*.local
+
+# Supabase local state
+supabase/.branches
+supabase/.temp
+**/.supabase/
+
+# Deno
+.deno/
+deno.lock
+
+# Node (en caso de scripts auxiliares)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Logs
+logs/
+*.log
+
+# Test artifacts
+coverage/
+.nyc_output/
