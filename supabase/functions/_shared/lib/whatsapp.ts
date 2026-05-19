@@ -102,19 +102,37 @@ export async function sendWhatsAppTemplate(
 
 /**
  * Descarga el blob de un media adjunto (audio, imagen) reportado en un webhook.
- * Endpoint Meta-style: GET /{media_id} → { url, mime_type, ... } y luego fetch del url.
+ *
+ * Flujo de dos pasos según docs Kapso:
+ *   1. GET /{media_id}?phone_number_id={pid}  → metadata con download_url (con token)
+ *   2. GET el download_url (SIN auth header, el token va embebido).
+ *
+ * Importante:
+ *   - download_url expira en ~4 minutos.
+ *   - phone_number_id es REQUERIDO; sin él la API devuelve 404.
+ *
+ * Docs: https://docs.kapso.ai/api/meta/whatsapp/media/get-media-url
+ *       https://docs.kapso.ai/api/meta/whatsapp/media/download-media-file
  */
 export async function fetchKapsoMedia(mediaId: string): Promise<Blob> {
-  const meta = await fetch(`${KAPSO_BASE}/${mediaId}`, {
-    headers: kapsoAuthHeaders(),
-  });
+  const pid = phoneNumberId();
+  const metaUrl = `${KAPSO_BASE}/${mediaId}?phone_number_id=${encodeURIComponent(pid)}`;
+  const meta = await fetch(metaUrl, { headers: kapsoAuthHeaders() });
   if (!meta.ok) {
-    throw new Error(`Kapso media metadata fetch failed: ${meta.status}`);
+    const body = await meta.text().catch(() => "");
+    throw new Error(`Kapso media metadata fetch failed: ${meta.status} ${body.slice(0, 200)}`);
   }
-  const info = await meta.json() as { url?: string; mime_type?: string };
-  if (!info.url) throw new Error("Kapso media response missing url");
+  const info = await meta.json() as {
+    download_url?: string;
+    url?: string;
+    mime_type?: string;
+  };
+  const downloadUrl = info.download_url ?? info.url;
+  if (!downloadUrl) throw new Error("Kapso media response missing download_url");
 
-  const blobRes = await fetch(info.url, { headers: kapsoAuthHeaders() });
+  // El download_url incluye token; NO mandamos X-API-Key porque el endpoint
+  // /media_download lo rechaza ("authentication is embedded in the token").
+  const blobRes = await fetch(downloadUrl);
   if (!blobRes.ok) {
     throw new Error(`Kapso media blob fetch failed: ${blobRes.status}`);
   }
