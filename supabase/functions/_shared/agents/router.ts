@@ -73,17 +73,21 @@ interface KapsoWebhookPayload extends KapsoEventItem {
 // =========================================================================
 // Entry point: handleKapsoEvent
 // =========================================================================
+// Cuando Kapso bufferea con buffer_enabled=true, varios mensajes del usuario
+// llegan AGRUPADOS en data[]. La intención del usuario es UNA SOLA, así que
+// los procesamos como una sola unidad: persistimos todos los inbounds primero,
+// y después invocamos al agente UNA SOLA VEZ con el último como "current"
+// (el agente verá los anteriores en su history conversacional).
+//
+// Esto evita el bug de "2 mensajes → 2 respuestas" cuando vienen en un batch.
 export async function handleKapsoEvent(payload: unknown): Promise<void> {
   const p = payload as KapsoWebhookPayload;
 
-  // Solo nos interesan los mensajes recibidos. Ignoramos sent/delivered/read/etc.
   if (p?.type && p.type !== "whatsapp.message.received") {
     log.debug("ignoring_event_type", { type: p.type });
     return;
   }
 
-  // Si viene en formato batch (buffer_enabled), iterar sobre data[].
-  // Si viene sin batch (no buffereado), procesar el payload directo.
   const items: KapsoEventItem[] = p.batch && Array.isArray(p.data)
     ? p.data
     : (p.message ? [p as KapsoEventItem] : []);
@@ -93,32 +97,111 @@ export async function handleKapsoEvent(payload: unknown): Promise<void> {
     return;
   }
 
+  // ---- Fase 1: ingest de todos los items del batch (rápido, en serie) ----
+  // Persistimos los inbounds primero. Idempotencia por whatsapp_message_id.
+  type Ingested = {
+    user: User;
+    msg: KapsoIncomingMessage;
+    userText: string;
+    inboundRecord: MessageRecord;
+  };
+
+  const ingested: Ingested[] = [];
+  let lastUser: User | null = null;
+
   for (const item of items) {
-    await processSingleMessage(item).catch((err) =>
-      log.error("process_single_message_failed", { err: String(err), wa_id: item.message?.id })
-    );
+    const result = await ingestItem(item).catch((err) => {
+      log.error("ingest_failed", { err: String(err), wa_id: item.message?.id });
+      return null;
+    });
+    if (result) {
+      ingested.push(result);
+      lastUser = result.user;
+    }
+  }
+
+  if (ingested.length === 0 || !lastUser) {
+    log.info("nothing_to_process", { items_total: items.length });
+    return;
+  }
+
+  // ---- Fase 2: contexto del negocio + 1 sola llamada al router ----
+  const supabase = db();
+  const memberships = await loadActiveMemberships(lastUser.id);
+  const business = await resolveBusiness(memberships);
+  const lastInbound = ingested[ingested.length - 1].inboundRecord;
+
+  // Si el batch trae varios mensajes del usuario, mostramos un userText
+  // consolidado (útil para logs/agent prompt). El agent leerá la history
+  // completa de DB de todos modos.
+  const combinedUserText = ingested.length === 1
+    ? ingested[0].userText
+    : ingested.map((i, idx) => `[Mensaje ${idx + 1}/${ingested.length}] ${i.userText}`).join("\n");
+
+  log.info("batch_processing", {
+    batch_size: items.length,
+    persisted_inbounds: ingested.length,
+    business_id: business?.id ?? null,
+  });
+
+  const routed = await route({
+    user: lastUser,
+    business,
+    memberships,
+    userText: combinedUserText,
+    inboundMessage: lastInbound,
+  });
+
+  // Re-leer business POR SI el agente lo acabó de crear durante este turn.
+  const finalBusinessId = await resolveCurrentBusinessId(lastUser.id, business?.id ?? null);
+
+  // Enviar la ÚNICA respuesta del turn + persistir outbound.
+  if (routed.text) {
+    let sentId: string | null = null;
+    try {
+      const sent = await sendWhatsAppText(lastUser.phone, routed.text);
+      sentId = sent.messages?.[0]?.id ?? sent.id ?? null;
+    } catch (err) {
+      log.error("outbound_send_failed", { err: String(err) });
+    }
+    await supabase.from("messages").insert({
+      business_id: finalBusinessId,
+      user_id: lastUser.id,
+      direction: "outbound",
+      content_type: "text",
+      raw_text: routed.text,
+      whatsapp_message_id: sentId,
+      tool_calls: routed.traces ?? null,
+    });
   }
 }
 
-async function processSingleMessage(item: KapsoEventItem): Promise<void> {
+/**
+ * Ingest de un item del batch: validación, dedupe, resuelve content, persiste
+ * inbound. Devuelve null si se debe ignorar (outbound, dupe, sin from, etc.).
+ */
+async function ingestItem(item: KapsoEventItem): Promise<{
+  user: User;
+  msg: KapsoIncomingMessage;
+  userText: string;
+  inboundRecord: MessageRecord;
+} | null> {
   if (!item.message) {
     log.debug("item_without_message");
-    return;
+    return null;
   }
   const msg = item.message;
 
-  // Ignorar mensajes outbound (echos del propio sistema).
   if (msg.kapso?.direction === "outbound") {
     log.debug("ignoring_outbound_event", { wa_id: msg.id });
-    return;
+    return null;
   }
-
   if (!msg.from) {
     log.warn("incoming_without_from", { wa_id: msg.id });
-    return;
+    return null;
   }
 
-  // 1. Idempotencia: si ya tenemos este whatsapp_message_id, no procesar.
+  // Idempotencia: si ya tenemos este whatsapp_message_id, no procesar.
   const supabase = db();
   const { data: existing } = await supabase
     .from("messages")
@@ -127,27 +210,28 @@ async function processSingleMessage(item: KapsoEventItem): Promise<void> {
     .maybeSingle();
   if (existing) {
     log.info("duplicate_message_ignored", { wa_id: msg.id });
-    return;
+    return null;
   }
 
-  // 2. Resolver / crear usuario por número.
   const phone = toE164(msg.from);
   const user = await upsertUserByPhone(phone);
 
-  // 3. Procesar media → texto.
   const { userText, contentType, mediaUrl, lat, lng, transcript, extractedData } =
     await resolveContent(msg);
 
-  // 4. Resolver contexto de negocio.
-  const memberships = await loadActiveMemberships(user.id);
-  const business = await resolveBusiness(memberships);
+  // Determinar business_id en el momento de persistir.
+  const { data: ownership } = await supabase
+    .from("business_members")
+    .select("business_id")
+    .eq("user_id", user.id)
+    .eq("active", true)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const businessId = (ownership as { business_id?: string } | null)?.business_id ?? null;
 
-  // 5. Insertar mensaje inbound.
-  // raw_text se llena con la representación textual EFECTIVA del mensaje del
-  // usuario (texto original, transcripción de audio o extracción de imagen).
-  // Esto garantiza que el agente vea contexto completo al cargar historial.
-  const inboundMessage = await insertInboundMessage({
-    business_id: business?.id ?? null,
+  const inboundRecord = await insertInboundMessage({
+    business_id: businessId,
     user_id: user.id,
     content_type: contentType,
     raw_text: userText || null,
@@ -159,33 +243,7 @@ async function processSingleMessage(item: KapsoEventItem): Promise<void> {
     whatsapp_message_id: msg.id,
   });
 
-  // 6. Routing.
-  const routed = await route({ user, business, memberships, userText, inboundMessage });
-
-  // 7. Re-leer business POR SI el agente lo acabó de crear durante este turn.
-  //    Esto evita persistir el outbound con business_id=NULL cuando ya existe.
-  const finalBusinessId = await resolveCurrentBusinessId(user.id, business?.id ?? null);
-
-  // 8. Enviar respuesta + persistir outbound.
-  if (routed.text) {
-    let sentId: string | null = null;
-    try {
-      const sent = await sendWhatsAppText(phone, routed.text);
-      sentId = sent.messages?.[0]?.id ?? sent.id ?? null;
-    } catch (err) {
-      log.error("outbound_send_failed", { err: String(err) });
-    }
-    // Persistir outbound aunque el send haya fallado (para tener registro completo).
-    await supabase.from("messages").insert({
-      business_id: finalBusinessId,
-      user_id: user.id,
-      direction: "outbound",
-      content_type: "text",
-      raw_text: routed.text,
-      whatsapp_message_id: sentId,
-      tool_calls: routed.traces ?? null,
-    });
-  }
+  return { user, msg, userText, inboundRecord };
 }
 
 /**

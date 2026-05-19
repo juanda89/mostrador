@@ -110,13 +110,15 @@ export async function runOnboardingAgent(args: RunOnboardingArgs): Promise<Agent
     },
   };
 
-  // 5. Construir messages para Anthropic
-  // history ya incluye el inboundMessage actual (se insertó antes de invocar al agente),
-  // así que no lo agregamos por separado.
-  const anthropicMessages: any[] = history.map((m) => ({
+  // 5. Construir messages para Anthropic.
+  // history ya incluye el inboundMessage actual (se insertó antes de invocar al agente).
+  // Anthropic requiere alternancia user/assistant — si vienen 2+ inbounds
+  // consecutivos del mismo batch, los MERGE en un solo user message.
+  const rawMessages = history.map((m) => ({
     role: m.direction === "inbound" ? "user" : "assistant",
     content: m.raw_text ?? m.transcript ?? "[mensaje vacío]",
   }));
+  const anthropicMessages: any[] = mergeConsecutiveSameRole(rawMessages);
 
   // 6. Loop con tool calling
   const tools = onboardingToolSchemas();
@@ -240,6 +242,28 @@ function extractText(content: any[]): string {
     .map((b) => b.text)
     .join("\n")
     .trim();
+}
+
+/**
+ * Anthropic requiere alternancia user/assistant. Cuando varios mensajes del
+ * usuario llegan en batch (o por algún motivo aparecen 2 user-turns seguidos
+ * sin assistant entre medio), los fusionamos en un solo content string para
+ * que el SDK no falle.
+ */
+function mergeConsecutiveSameRole(msgs: Array<{ role: string; content: string }>): Array<{
+  role: string;
+  content: string;
+}> {
+  const out: Array<{ role: string; content: string }> = [];
+  for (const m of msgs) {
+    const prev = out[out.length - 1];
+    if (prev && prev.role === m.role && typeof prev.content === "string") {
+      prev.content = `${prev.content}\n${m.content}`;
+    } else {
+      out.push({ ...m });
+    }
+  }
+  return out;
 }
 
 /**
