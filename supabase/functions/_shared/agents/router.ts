@@ -320,27 +320,54 @@ async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedConten
       let extractedText = captionHint ? `[Imagen recibida]\nNota del dueño: ${captionHint}` : "[Imagen recibida]";
       let extractedData: unknown = null;
 
-      if (imageId) {
+      if (!imageId) {
+        log.warn("image_without_id", { msg_id: msg.id });
+        extractedData = { error: "image_without_id", phase: "intake" };
+      } else {
+        // Paso 1: descargar el blob desde Kapso. Capturamos errores granulares para
+        // poder diagnosticar después por qué falla la extracción.
+        let blob: Blob | null = null;
         try {
-          const blob = await fetchKapsoMedia(imageId);
-          const result = await extractMenu(blob);
-          extractedData = result;
-          const lines = result.lines
-            .map((l) => l.price ? `- ${l.name} — $${l.price}` : `- ${l.name} (sin precio)`)
-            .join("\n");
-          extractedText = lines
-            ? `[Foto de menú extraída por OCR]\n${lines}${captionHint ? `\nNota del dueño: ${captionHint}` : ""}`
-            : extractedText;
-          log.info("image_extracted", {
+          blob = await fetchKapsoMedia(imageId);
+          log.info("kapso_media_downloaded", {
             image_id: imageId,
-            lines: result.lines.length,
-            vendor: result.vendor_name,
+            bytes: blob.size,
+            mime: blob.type,
           });
         } catch (err) {
-          log.error("image_extract_failed", { err: String(err), image_id: imageId });
+          const errMsg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+          log.error("kapso_media_fetch_failed", { err: errMsg, image_id: imageId });
+          extractedData = { error: errMsg, phase: "kapso_fetch", image_id: imageId };
         }
-      } else {
-        log.warn("image_without_id", { msg_id: msg.id });
+
+        // Paso 2: si la descarga sirvió, mandar a Gemini.
+        if (blob) {
+          try {
+            const result = await extractMenu(blob);
+            extractedData = result;
+            const lines = result.lines
+              .map((l) => l.price ? `- ${l.name} — $${l.price}` : `- ${l.name} (sin precio)`)
+              .join("\n");
+            extractedText = lines
+              ? `[Foto de menú extraída por OCR]\n${lines}${captionHint ? `\nNota del dueño: ${captionHint}` : ""}`
+              : extractedText;
+            log.info("image_extracted", {
+              image_id: imageId,
+              lines: result.lines.length,
+              vendor: result.vendor_name,
+            });
+          } catch (err) {
+            const errMsg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+            log.error("gemini_extract_failed", { err: errMsg, image_id: imageId });
+            extractedData = {
+              error: errMsg,
+              phase: "gemini_extract",
+              image_id: imageId,
+              bytes: blob.size,
+              mime: blob.type,
+            };
+          }
+        }
       }
 
       return {

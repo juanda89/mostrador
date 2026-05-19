@@ -28,7 +28,23 @@ export interface OnboardingPromptCtx {
   hasAnyRecipe: boolean;
 }
 
-export function onboardingSystemPrompt(ctx: OnboardingPromptCtx): string {
+/**
+ * Retorna el system prompt como ARRAY de bloques para habilitar prompt caching:
+ *   - Bloque 0 (cacheable): reglas + flujo. ~5K tokens, idénticos entre turns.
+ *   - Bloque 1 (no cacheable): contexto del business y checklist actual.
+ *
+ * El SDK de Anthropic acepta system como string O array de {type:"text",text,cache_control?}.
+ * Bloque 0 marcado con cache_control: ephemeral (5 min TTL) corta input cost 90% en
+ * llamadas sucesivas dentro de la misma conversación.
+ */
+export function onboardingSystemPrompt(ctx: OnboardingPromptCtx) {
+  return [
+    { type: "text" as const, text: STATIC_PROMPT, cache_control: { type: "ephemeral" as const } },
+    { type: "text" as const, text: dynamicContext(ctx) },
+  ];
+}
+
+function dynamicContext(ctx: OnboardingPromptCtx): string {
   const businessName = ctx.business?.name ?? "(aún no me dijo el nombre)";
   const userName = ctx.user.name ?? "(no sé su nombre)";
   const phone = ctx.user.phone;
@@ -44,17 +60,18 @@ export function onboardingSystemPrompt(ctx: OnboardingPromptCtx): string {
     ].join("\n")
     : "  (todavía no hay negocio creado — tu primer paso es crearlo cuando tengas el nombre)";
 
-  return `
-Eres Mostrador. Le hablas a la dueña/dueño de un negocio de comidas rápidas en Colombia.
-Probablemente nunca usó software de inventario; piensa "cuaderno + WhatsApp".
+  return `# CONTEXTO DE ESTA CONVERSACIÓN
 
-# CONTEXTO
-
-- WhatsApp: ${phone}
+- WhatsApp del cliente: ${phone}
 - Nombre persona (si lo sabes): ${userName}
 - Negocio: ${businessName}
 - Estado del checklist:
-${checklistStatus}
+${checklistStatus}`;
+}
+
+const STATIC_PROMPT = `
+Eres Mostrador. Le hablas a la dueña/dueño de un negocio de comidas rápidas en Colombia.
+Probablemente nunca usó software de inventario; piensa "cuaderno + WhatsApp".
 
 # OBJETIVO
 
@@ -266,7 +283,6 @@ Mal:
   "¿Así tal cual, 'El Piki'? ¿O lleva algo más en el nombre?"
   "He registrado satisfactoriamente la información."
 `.trim();
-}
 
 function tick(b: boolean): string {
   return b ? "✓ listo" : "✗ falta";
