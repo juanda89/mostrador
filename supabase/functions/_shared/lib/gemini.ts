@@ -1,6 +1,6 @@
 // Cliente Google Gemini (usado para extracción de imágenes: facturas, menús).
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenerativeAI } from "npm:@google/generative-ai@^0.21.0";
 
 let _client: GoogleGenerativeAI | null = null;
 

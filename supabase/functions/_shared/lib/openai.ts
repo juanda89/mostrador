@@ -1,6 +1,6 @@
 // Cliente OpenAI (solo usado para Whisper).
 
-import OpenAI from "openai";
+import OpenAI from "npm:openai@^4.67.0";
 
 let _client: OpenAI | null = null;
 

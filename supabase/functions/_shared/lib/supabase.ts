@@ -1,7 +1,7 @@
 // Cliente Supabase singleton con SERVICE ROLE.
 // Bypassea RLS — solo se usa server-side.
 
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "npm:@supabase/supabase-js@^2.45.0";
 
 let _client: SupabaseClient | null = null;
 

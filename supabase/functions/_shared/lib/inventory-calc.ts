@@ -64,7 +64,12 @@ export function computeIngredientUsage(
     accumulate(item.product_id, item.qty, products, componentsByParent, recipesByProduct, usage);
   }
 
-  return Array.from(usage.entries()).map(([ingredient_id, qty]) => ({ ingredient_id, qty }));
+  // Redondear a 4 decimales para matchear la precisión de NUMERIC(14,4) del schema
+  // y evitar drift por IEEE-754 (ej. 0.05+0.05+0.05 = 0.15000000000000002).
+  return Array.from(usage.entries()).map(([ingredient_id, qty]) => ({
+    ingredient_id,
+    qty: Math.round(qty * 10000) / 10000,
+  }));
 }
 
 function accumulate(

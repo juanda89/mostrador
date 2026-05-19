@@ -1,6 +1,6 @@
 // Cliente Anthropic con proxy opcional a Helicone para observabilidad.
 
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic from "npm:@anthropic-ai/sdk@^0.30.0";
 
 let _client: Anthropic | null = null;
 

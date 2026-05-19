@@ -31,30 +31,30 @@ INSERT INTO locations (id, business_id, name, lat, lng) VALUES
 
 -- 6. Productos simples + combo.
 INSERT INTO products (id, business_id, name, price, is_composite) VALUES
-  ('p0000001-0000-0000-0000-000000000001', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Empanada de carne',  3000, FALSE),
-  ('p0000002-0000-0000-0000-000000000002', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Empanada de pollo',  3000, FALSE),
-  ('p0000003-0000-0000-0000-000000000003', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Empanada de queso',  2500, FALSE),
-  ('p0000004-0000-0000-0000-000000000004', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Gaseosa personal',   2500, FALSE),
-  ('p0000005-0000-0000-0000-000000000005', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Combo (2 empanadas + gaseosa)', 7500, TRUE);
+  ('aaa00001-0000-0000-0000-000000000001', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Empanada de carne',  3000, FALSE),
+  ('aaa00002-0000-0000-0000-000000000002', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Empanada de pollo',  3000, FALSE),
+  ('aaa00003-0000-0000-0000-000000000003', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Empanada de queso',  2500, FALSE),
+  ('aaa00004-0000-0000-0000-000000000004', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Gaseosa personal',   2500, FALSE),
+  ('aaa00005-0000-0000-0000-000000000005', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Combo (2 empanadas + gaseosa)', 7500, TRUE);
 
 -- 7. Composición del combo: 2 empanadas de carne + 1 gaseosa.
 INSERT INTO product_components (parent_product_id, child_product_id, qty) VALUES
-  ('p0000005-0000-0000-0000-000000000005', 'p0000001-0000-0000-0000-000000000001', 2),
-  ('p0000005-0000-0000-0000-000000000005', 'p0000004-0000-0000-0000-000000000004', 1);
+  ('aaa00005-0000-0000-0000-000000000005', 'aaa00001-0000-0000-0000-000000000001', 2),
+  ('aaa00005-0000-0000-0000-000000000005', 'aaa00004-0000-0000-0000-000000000004', 1);
 
 -- 8. Ingredientes con stock inicial.
 INSERT INTO ingredients (id, business_id, name, unit, current_stock) VALUES
-  ('i0000001-0000-0000-0000-000000000001', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Carne molida', 'kg', 5),
-  ('i0000002-0000-0000-0000-000000000002', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Pollo',        'kg', 5),
-  ('i0000003-0000-0000-0000-000000000003', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Queso',        'kg', 2),
-  ('i0000004-0000-0000-0000-000000000004', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Masa',         'kg', 10);
+  ('bbb00001-0000-0000-0000-000000000001', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Carne molida', 'kg', 5),
+  ('bbb00002-0000-0000-0000-000000000002', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Pollo',        'kg', 5),
+  ('bbb00003-0000-0000-0000-000000000003', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Queso',        'kg', 2),
+  ('bbb00004-0000-0000-0000-000000000004', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Masa',         'kg', 10);
 
 -- 9. Recetas (gramos por porción → convertidos a kg para coincidir con la unidad).
 INSERT INTO product_recipes (product_id, ingredient_id, qty_per_unit) VALUES
-  ('p0000001-0000-0000-0000-000000000001', 'i0000001-0000-0000-0000-000000000001', 0.080), -- 80g carne
-  ('p0000001-0000-0000-0000-000000000001', 'i0000004-0000-0000-0000-000000000004', 0.050), -- 50g masa
-  ('p0000002-0000-0000-0000-000000000002', 'i0000002-0000-0000-0000-000000000002', 0.070), -- 70g pollo
-  ('p0000002-0000-0000-0000-000000000002', 'i0000004-0000-0000-0000-000000000004', 0.050), -- 50g masa
-  ('p0000003-0000-0000-0000-000000000003', 'i0000003-0000-0000-0000-000000000003', 0.040), -- 40g queso
-  ('p0000003-0000-0000-0000-000000000003', 'i0000004-0000-0000-0000-000000000004', 0.050); -- 50g masa
+  ('aaa00001-0000-0000-0000-000000000001', 'bbb00001-0000-0000-0000-000000000001', 0.080), -- 80g carne
+  ('aaa00001-0000-0000-0000-000000000001', 'bbb00004-0000-0000-0000-000000000004', 0.050), -- 50g masa
+  ('aaa00002-0000-0000-0000-000000000002', 'bbb00002-0000-0000-0000-000000000002', 0.070), -- 70g pollo
+  ('aaa00002-0000-0000-0000-000000000002', 'bbb00004-0000-0000-0000-000000000004', 0.050), -- 50g masa
+  ('aaa00003-0000-0000-0000-000000000003', 'bbb00003-0000-0000-0000-000000000003', 0.040), -- 40g queso
+  ('aaa00003-0000-0000-0000-000000000003', 'bbb00004-0000-0000-0000-000000000004', 0.050); -- 50g masa
 -- Gaseosa no tiene receta a propósito (no se trackea su inventario).
