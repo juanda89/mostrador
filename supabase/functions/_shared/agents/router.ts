@@ -9,26 +9,42 @@ import { log } from "../lib/log.ts";
 import { toE164 } from "../lib/phone.ts";
 import { sendWhatsAppText, fetchKapsoMedia } from "../lib/whatsapp.ts";
 import { transcribeAudio } from "../media/whisper.ts";
-import type { ContentType, MessageRecord, Business, Membership, User } from "../types/domain.ts";
+import type {
+  Business,
+  ContentType,
+  Membership,
+  MessageRecord,
+  User,
+} from "../types/domain.ts";
 
 // =========================================================================
 // Tipos del webhook de Kapso (subset).
-// Verificar contra docs reales en kapso.ai. Si difieren, ajustar aquí.
+// Docs: https://docs.kapso.ai/docs/platform/webhooks/event-types
+// La doc advierte: "Do not assume `phone_number`, `from`, `to`, or `wa_id`
+// are always present." → todos opcionales.
 // =========================================================================
 interface KapsoIncomingMessage {
   id: string;
-  from: string;                       // número del usuario en formato Meta (sin +)
-  type: "text" | "audio" | "image" | "location" | "interactive";
+  timestamp?: string;
+  from?: string;                       // número del usuario en formato Meta (sin +)
+  type: "text" | "audio" | "image" | "location" | "interactive" | string;
   text?: { body: string };
   audio?: { id: string; mime_type?: string };
   image?: { id: string; mime_type?: string; caption?: string };
-  location?: { latitude: number; longitude: number };
+  location?: { latitude: number; longitude: number; name?: string; address?: string };
+  /** Kapso agrega un objeto enriquecido con cosas como direction, status, transcript */
+  kapso?: {
+    direction?: "inbound" | "outbound";
+    status?: string;
+    content?: string;
+    transcript?: string;             // ¡Kapso transcribe audio automáticamente!
+  };
 }
 
 interface KapsoWebhookPayload {
   message?: KapsoIncomingMessage;
-  // Kapso puede mandar batches o eventos sin mensaje (status, etc.).
-  // Ignoramos lo que no reconocemos.
+  conversation?: { id: string };
+  phone_number_id?: string;
 }
 
 // =========================================================================
@@ -41,6 +57,17 @@ export async function handleKapsoEvent(payload: unknown): Promise<void> {
     return;
   }
   const msg = p.message;
+
+  // Ignorar mensajes outbound (echos del propio sistema).
+  if (msg.kapso?.direction === "outbound") {
+    log.debug("ignoring_outbound_event", { wa_id: msg.id });
+    return;
+  }
+
+  if (!msg.from) {
+    log.warn("incoming_without_from", { wa_id: msg.id });
+    return;
+  }
 
   // 1. Idempotencia: si ya tenemos este whatsapp_message_id, no procesar.
   const supabase = db();
@@ -59,7 +86,7 @@ export async function handleKapsoEvent(payload: unknown): Promise<void> {
   const user = await upsertUserByPhone(phone);
 
   // 3. Procesar media → texto.
-  const { userText, contentType, mediaUrl, lat, lng } = await resolveContent(msg);
+  const { userText, contentType, mediaUrl, lat, lng, transcript } = await resolveContent(msg);
 
   // 4. Resolver contexto de negocio.
   const memberships = await loadActiveMemberships(user.id);
@@ -72,7 +99,7 @@ export async function handleKapsoEvent(payload: unknown): Promise<void> {
     content_type: contentType,
     raw_text: msg.text?.body ?? null,
     media_url: mediaUrl,
-    transcript: contentType === "audio" ? userText : null,
+    transcript,
     latitude: lat,
     longitude: lng,
     whatsapp_message_id: msg.id,
@@ -85,13 +112,14 @@ export async function handleKapsoEvent(payload: unknown): Promise<void> {
   if (reply) {
     try {
       const sent = await sendWhatsAppText(phone, reply);
+      const sentId = sent.messages?.[0]?.id ?? sent.id ?? null;
       await supabase.from("messages").insert({
         business_id: business?.id ?? null,
         user_id: user.id,
         direction: "outbound",
         content_type: "text",
         raw_text: reply,
-        whatsapp_message_id: sent.id,
+        whatsapp_message_id: sentId,
       });
     } catch (err) {
       log.error("outbound_send_failed", { err: String(err) });
@@ -151,6 +179,7 @@ interface ResolvedContent {
   mediaUrl: string | null;
   lat: number | null;
   lng: number | null;
+  transcript: string | null;
 }
 
 async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedContent> {
@@ -162,28 +191,56 @@ async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedConten
         mediaUrl: null,
         lat: null,
         lng: null,
+        transcript: null,
       };
     case "audio": {
-      const blob = await fetchKapsoMedia(msg.audio!.id);
-      const text = await transcribeAudio(blob);
-      return { userText: text, contentType: "audio", mediaUrl: msg.audio!.id, lat: null, lng: null };
+      // Si Kapso ya transcribió, usamos eso y ahorramos Whisper.
+      if (msg.kapso?.transcript) {
+        return {
+          userText: msg.kapso.transcript,
+          contentType: "audio",
+          mediaUrl: msg.audio?.id ?? null,
+          lat: null,
+          lng: null,
+          transcript: msg.kapso.transcript,
+        };
+      }
+      // Fallback: descargar el blob y mandar a Whisper.
+      if (!msg.audio?.id) return emptyAudio();
+      try {
+        const blob = await fetchKapsoMedia(msg.audio.id);
+        const text = await transcribeAudio(blob);
+        return {
+          userText: text,
+          contentType: "audio",
+          mediaUrl: msg.audio.id,
+          lat: null,
+          lng: null,
+          transcript: text,
+        };
+      } catch (err) {
+        log.error("audio_transcription_failed", { err: String(err) });
+        return emptyAudio();
+      }
     }
     case "image":
       // Fase 4: pasar por Gemini. Por ahora solo registramos el caption.
       return {
         userText: msg.image?.caption ?? "[imagen]",
         contentType: "image",
-        mediaUrl: msg.image!.id,
+        mediaUrl: msg.image?.id ?? null,
         lat: null,
         lng: null,
+        transcript: null,
       };
     case "location":
       return {
         userText: "[ubicación]",
         contentType: "location",
         mediaUrl: null,
-        lat: msg.location!.latitude,
-        lng: msg.location!.longitude,
+        lat: msg.location?.latitude ?? null,
+        lng: msg.location?.longitude ?? null,
+        transcript: null,
       };
     default:
       return {
@@ -192,8 +249,20 @@ async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedConten
         mediaUrl: null,
         lat: null,
         lng: null,
+        transcript: null,
       };
   }
+}
+
+function emptyAudio(): ResolvedContent {
+  return {
+    userText: "[audio no transcribible]",
+    contentType: "audio",
+    mediaUrl: null,
+    lat: null,
+    lng: null,
+    transcript: null,
+  };
 }
 
 interface InsertInboundArgs {
