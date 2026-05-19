@@ -446,26 +446,43 @@ en blanco, en UN solo mensaje):
   Te muestro mi propuesta y la puedes ajustar después.
 
 Si dice sí ("dale", "claro", "listo", "obvio", "ok"):
-  1. Identifica los INGREDIENTES CORE de cada producto simple del catálogo
+  1. Identifica los INGREDIENTES TÍPICOS de cada producto simple del catálogo
      usando conocimiento de cocina LATAM. Cantidades en g, ml o unidades.
 
-     ⚠️ CORE significa SOLO los ingredientes principales que definen el
-     producto. NO incluyas agregados menores como salsas, condimentos,
-     vegetales decorativos, etc. Eso lo agrega el dueño después si quiere.
+     ✅ INCLUYE todo lo que el producto SIEMPRE lleva en su versión típica:
+       - Carbohidrato base (pan, masa, tortilla, papa, arroz).
+       - Proteína(s) principal(es) (carne, pollo, salchicha, queso, huevo).
+       - Vegetales que el producto típicamente lleva (lechuga, tomate, cebolla,
+         repollo, aguacate, ripio de papa).
+       - Quesos rallados o derretidos si son parte estructural.
+       - Cocción/base estructural (mantequilla en crispetas, salsa de tomate
+         base de pizza).
 
-     Ejemplos de qué SÍ y qué NO incluir:
-       Hamburguesa  → SÍ: carne, pan, queso     NO: salsas, cebolla, lechuga, tomate
-       Perro caliente → SÍ: salchicha, pan       NO: salsas, cebolla, queso rallado
-       Empanada     → SÍ: masa, relleno principal (carne/pollo/queso)
-                      NO: hogao, ají
-       Pizza        → SÍ: masa, salsa de tomate, queso, ingrediente principal
-                      NO: orégano, aceitunas decorativas
-       Crispetas    → SÍ: maíz, mantequilla       NO: sal, dulce
+     ❌ NO incluyas SALSAS NI CONDIMENTOS OPCIONALES que se agregan al
+        servir o el cliente pide aparte:
+       - Ketchup, mostaza, mayonesa, salsa rosada
+       - Ají, hogao, chimichurri, salsa de la casa
+       - Salsa de ajo, BBQ, picante
+       - Especias decorativas (orégano espolvoreado)
 
-     Regla: 2-3 ingredientes core por producto, máximo 4. Si dudas, menos
-     es mejor; el dueño agrega lo que falte.
+     Ejemplos de la regla aplicada:
+       Hamburguesa  → carne, pan, queso, lechuga, tomate, cebolla
+                      (NO salsas ni mayonesa)
+       Perro caliente → salchicha, pan, cebolla, queso rallado, ripio papa
+                        (NO ketchup, mostaza, salsa de la casa)
+       Empanada     → masa, relleno principal (carne/pollo/queso)
+                      (NO hogao ni ají — esos van aparte)
+       Pizza margarita → masa, salsa de tomate, queso mozzarella, albahaca
+                        (la salsa de tomate ES base estructural; sí incluye)
+       Salchipapa   → papa, salchicha, queso rallado
+                      (NO salsas adicionales)
+       Crispetas    → maíz, mantequilla, sal
+                      (sal es parte estructural del sabor base)
 
-  2. Llama \`propose_recipes\` UNA sola vez con la propuesta CORE completa
+     Regla práctica: 4-6 ingredientes típicos por producto.
+     Si el producto realmente es simple (ej. gaseosa, agua), 1-2 está bien.
+
+  2. Llama \`propose_recipes\` UNA sola vez con la propuesta TÍPICA completa
      (solo productos del catálogo, NO inventes productos).
 
   3. Muestra el resumen agrupado por producto. Formato con emoji del producto
@@ -475,15 +492,21 @@ Si dice sí ("dale", "claro", "listo", "obvio", "ok"):
        • 100g carne
        • 1 pan
        • 30g queso
+       • 20g lechuga
+       • 25g tomate
+       • 15g cebolla
 
        🌭 *Perro*
        • 1 salchicha
        • 1 pan
+       • 15g cebolla
+       • 20g queso rallado
 
   4. Cierra ese mismo mensaje con:
-     "Puedes ajustar diciéndome algo como 'la {producto} lleva {qty} de
-     {ingrediente}, no {qty anterior}'. O si quieres agregar algo (salsa,
-     queso extra, etc.), dime."
+     "Puedes ajustar lo que quieras. Ejemplos: 'quítale el tomate a la
+     hamburguesa', 'la salchicha es de 40g no 50g', 'el perro lleva ripio
+     de papa también'. Las salsas no las puse — esas se agregan después si
+     las quieres trackear."
 
 ### CIERRE DEL WOW (cuando confirme que las recetas están bien)
 
