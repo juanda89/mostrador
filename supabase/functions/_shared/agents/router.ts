@@ -9,7 +9,7 @@ import { log } from "../lib/log.ts";
 import { toE164 } from "../lib/phone.ts";
 import { sendWhatsAppText, fetchKapsoMedia } from "../lib/whatsapp.ts";
 import { transcribeAudio } from "../media/whisper.ts";
-import { extractMenu } from "../media/gemini.ts";
+import { extractInvoice, extractMenu } from "../media/gemini.ts";
 import { runOnboardingAgent } from "./onboarding/agent.ts";
 import { runProductionAgent } from "./production/agent.ts";
 import type {
@@ -255,10 +255,8 @@ async function ingestItem(item: KapsoEventItem): Promise<{
   const phone = toE164(msg.from);
   const user = await upsertUserByPhone(phone);
 
-  const { userText, contentType, mediaUrl, lat, lng, transcript, extractedData } =
-    await resolveContent(msg);
-
-  // Determinar business_id en el momento de persistir.
+  // Determinar business + state ANTES de procesar la imagen, así sabemos si
+  // debemos llamar extractMenu (onboarding) o extractInvoice (producción).
   const { data: ownership } = await supabase
     .from("business_members")
     .select("business_id")
@@ -268,6 +266,18 @@ async function ingestItem(item: KapsoEventItem): Promise<{
     .limit(1)
     .maybeSingle();
   const businessId = (ownership as { business_id?: string } | null)?.business_id ?? null;
+  let mode: ContentMode = "onboarding";
+  if (businessId) {
+    const { data: biz } = await supabase
+      .from("businesses")
+      .select("state")
+      .eq("id", businessId)
+      .maybeSingle();
+    if ((biz as any)?.state === "production") mode = "production";
+  }
+
+  const { userText, contentType, mediaUrl, lat, lng, transcript, extractedData } =
+    await resolveContent(msg, mode);
 
   const inboundRecord = await insertInboundMessage({
     business_id: businessId,
@@ -472,7 +482,17 @@ interface ResolvedContent {
   extractedData: unknown | null;
 }
 
-async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedContent> {
+/**
+ * Mode condiciona cómo extraemos imágenes:
+ *   - onboarding: las imágenes son menús → extractMenu
+ *   - production: las imágenes son recibos de compra → extractInvoice
+ */
+type ContentMode = "onboarding" | "production";
+
+async function resolveContent(
+  msg: KapsoIncomingMessage,
+  mode: ContentMode = "onboarding",
+): Promise<ResolvedContent> {
   switch (msg.type) {
     case "text":
       return {
@@ -546,30 +566,48 @@ async function resolveContent(msg: KapsoIncomingMessage): Promise<ResolvedConten
         }
 
         // Paso 2: si la descarga sirvió, mandar a Gemini.
+        // En onboarding → extractMenu. En producción → extractInvoice.
         if (blob) {
           try {
-            const result = await extractMenu(blob);
-            extractedData = result;
-            const lines = result.lines
-              .map((l) => l.price ? `- ${l.name} — $${l.price}` : `- ${l.name} (sin precio)`)
-              .join("\n");
-            extractedText = lines
-              ? `[Foto de menú extraída por OCR]\n${lines}${captionHint ? `\nNota del dueño: ${captionHint}` : ""}`
-              : extractedText;
-            log.info("image_extracted", {
-              image_id: imageId,
-              lines: result.lines.length,
-              vendor: result.vendor_name,
-            });
+            if (mode === "production") {
+              const result = await extractInvoice(blob);
+              extractedData = result;
+              const lines = result.lines
+                .map((l) => {
+                  const qtyStr = l.qty !== undefined ? `${l.qty}${l.unit ? l.unit : ""}` : "";
+                  const priceStr = l.unit_price ? ` a $${l.unit_price}` : (l.subtotal ? ` = $${l.subtotal}` : "");
+                  return `- ${l.ingredient_name} ${qtyStr}${priceStr}`.replace(/\s+/g, " ").trim();
+                })
+                .join("\n");
+              extractedText = lines
+                ? `[Foto de factura/recibo extraída por OCR]\nProveedor: ${result.vendor_name ?? "(no detectado)"}\n${lines}${result.total ? `\nTotal: $${result.total}` : ""}${captionHint ? `\nNota: ${captionHint}` : ""}`
+                : extractedText;
+              log.info("invoice_extracted", { image_id: imageId, lines: result.lines.length });
+            } else {
+              const result = await extractMenu(blob);
+              extractedData = result;
+              const lines = result.lines
+                .map((l) => l.price ? `- ${l.name} — $${l.price}` : `- ${l.name} (sin precio)`)
+                .join("\n");
+              extractedText = lines
+                ? `[Foto de menú extraída por OCR]\n${lines}${captionHint ? `\nNota del dueño: ${captionHint}` : ""}`
+                : extractedText;
+              log.info("image_extracted", {
+                image_id: imageId,
+                lines: result.lines.length,
+                vendor: result.vendor_name,
+              });
+            }
           } catch (err) {
             const errMsg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-            log.error("gemini_extract_failed", { err: errMsg, image_id: imageId });
+            log.error("gemini_extract_failed", { err: errMsg, image_id: imageId, mode });
             extractedData = {
               error: errMsg,
               phase: "gemini_extract",
               image_id: imageId,
               bytes: blob.size,
               mime: blob.type,
+              mode,
             };
           }
         }

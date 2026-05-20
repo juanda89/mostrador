@@ -10,6 +10,7 @@
 import { db } from "../lib/supabase.ts";
 import { log } from "../lib/log.ts";
 import { localHHMM, localWeekday } from "../lib/time.ts";
+import { generateAndSendDailyReport } from "./daily-report.ts";
 
 interface TickSummary {
   businesses_evaluated: number;
@@ -22,7 +23,7 @@ export async function runTick(now: Date): Promise<TickSummary> {
   const supabase = db();
   const { data: businesses, error } = await supabase
     .from("businesses")
-    .select("id, name, timezone, state, business_settings(*)")
+    .select("id, name, timezone, currency, owner_user_id, state, business_settings(*)")
     .eq("state", "production");
   if (error) throw error;
 
@@ -53,15 +54,24 @@ export async function runTick(now: Date): Promise<TickSummary> {
       }
     }
 
-    // Daily report (Fase 6).
+    // Daily report.
     if (
       settings.daily_report_enabled &&
       hhmm === settings.daily_report_time.slice(0, 5)
     ) {
       try {
-        // await generateAndSendDailyReport(b.id, b.timezone, now);
-        // summary.daily_reports_sent++;
-        log.info("daily_report_pending_impl", { business_id: b.id });
+        const result = await generateAndSendDailyReport(
+          {
+            id: b.id,
+            name: b.name,
+            timezone: b.timezone,
+            currency: b.currency,
+            owner_user_id: b.owner_user_id,
+            business_settings: settings,
+          },
+          now,
+        );
+        if (result.ok && result.report_log_id) summary.daily_reports_sent++;
       } catch (err) {
         log.error("daily_report_failed", { business_id: b.id, err: String(err) });
       }

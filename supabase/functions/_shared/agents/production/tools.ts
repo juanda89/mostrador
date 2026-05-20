@@ -631,7 +631,235 @@ const updateRecipe: ToolDef = {
 };
 
 // =========================================================================
-// 10. correct_last_sale  (vendedor + dueño)
+// 10. register_purchase  (owner + seller)
+// =========================================================================
+// Registra una compra de insumos del negocio. Cada item incrementa el stock
+// del ingrediente, actualiza last_unit_cost, e inserta una entrada en
+// price_history. Si el ingrediente no existe, lo crea (case-insensitive).
+const registerPurchase: ToolDef = {
+  allowedRoles: ["owner", "seller"],
+  schema: {
+    name: "register_purchase",
+    description:
+      "Registra una compra de insumos: una o varias líneas de ingrediente + qty + precio. Suma al inventario, guarda el costo unitario y registra el cambio de precio. Idempotente por source_message_id. Si un ingrediente no existe, lo crea automáticamente.",
+    input_schema: {
+      type: "object",
+      properties: {
+        items: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              ingredient_name: { type: "string", description: "Nombre del ingrediente. Si no existe, se crea." },
+              qty: { type: "number", description: "Cantidad comprada en la unit indicada." },
+              unit: {
+                type: "string",
+                enum: ["g", "kg", "ml", "l", "unit"],
+                description: "Unidad de medida. Si el ingrediente ya existe, se usa la unidad existente; este campo se ignora.",
+              },
+              unit_price: { type: "number", description: "Precio por unidad (ej. precio por kg). Opcional si pasas subtotal." },
+              subtotal: { type: "number", description: "Costo total de esta línea. Opcional si pasas unit_price." },
+            },
+            required: ["ingredient_name", "qty", "unit"],
+          },
+        },
+        vendor_name: { type: "string", description: "Proveedor opcional (ej. 'Frigorífico La 80')." },
+        total: { type: "number", description: "Total de la compra. Opcional; se calcula sumando subtotales si no se pasa." },
+        source: {
+          type: "string",
+          enum: ["photo", "voice", "text"],
+          description: "Cómo llegó la información de la compra: foto del recibo, audio o texto del dueño.",
+        },
+      },
+      required: ["items", "source"],
+    },
+  },
+  handler: async (input, ctx) => {
+    const supabase = db();
+
+    // Idempotencia por source_message_id
+    const { data: existing } = await supabase
+      .from("purchases")
+      .select("id, total, vendor_name")
+      .eq("source_message_id", ctx.inboundMessageId)
+      .maybeSingle();
+    if (existing) {
+      log.info("register_purchase_idempotent_hit", { purchase_id: (existing as any).id });
+      return { ok: true, data: { purchase: existing, _existed: true } };
+    }
+
+    // Resolver/crear ingredientes y preparar líneas
+    type ResolvedItem = {
+      ingredient_id: string;
+      ingredient_name: string;
+      unit: string;
+      qty: number;
+      unit_price: number;
+      subtotal: number;
+      was_created: boolean;
+    };
+    const resolved: ResolvedItem[] = [];
+
+    for (const it of input.items as Array<any>) {
+      if (typeof it.qty !== "number" || it.qty <= 0) {
+        return { ok: false, error: `Cantidad inválida para "${it.ingredient_name}": ${it.qty}` };
+      }
+      // Derivar unit_price y subtotal
+      let unitPrice = typeof it.unit_price === "number" ? it.unit_price : null;
+      let subtotal = typeof it.subtotal === "number" ? it.subtotal : null;
+      if (unitPrice === null && subtotal === null) {
+        return {
+          ok: false,
+          error: `Falta precio para "${it.ingredient_name}": pásame unit_price o subtotal.`,
+        };
+      }
+      if (unitPrice === null) unitPrice = subtotal! / it.qty;
+      if (subtotal === null) subtotal = unitPrice! * it.qty;
+
+      // Buscar ingrediente existente
+      let ing = await findIngredientByName(ctx.business.id, it.ingredient_name);
+      let was_created = false;
+      if (!ing) {
+        const { data: created, error: cErr } = await supabase
+          .from("ingredients")
+          .insert({
+            business_id: ctx.business.id,
+            name: it.ingredient_name.trim(),
+            unit: it.unit,
+            current_stock: 0,
+          })
+          .select("id, name, unit, current_stock")
+          .single();
+        if (cErr) return { ok: false, error: `No pude crear ingrediente "${it.ingredient_name}": ${cErr.message}` };
+        ing = created as any;
+        was_created = true;
+      }
+
+      resolved.push({
+        ingredient_id: ing!.id,
+        ingredient_name: ing!.name,
+        unit: ing!.unit,
+        qty: it.qty,
+        unit_price: unitPrice!,
+        subtotal: subtotal!,
+        was_created,
+      });
+    }
+
+    const total = input.total ?? resolved.reduce((s, it) => s + it.subtotal, 0);
+
+    // Crear purchase + purchase_items
+    const { data: purchase, error: pErr } = await supabase
+      .from("purchases")
+      .insert({
+        business_id: ctx.business.id,
+        registered_by_user_id: ctx.user.id,
+        vendor_name: input.vendor_name ?? null,
+        total,
+        source: input.source,
+        source_message_id: ctx.inboundMessageId,
+        purchased_at: new Date().toISOString(),
+      })
+      .select("id, total, vendor_name")
+      .single();
+    if (pErr) return { ok: false, error: `No pude guardar la compra: ${pErr.message}` };
+
+    for (const it of resolved) {
+      const { error: itErr } = await supabase.from("purchase_items").insert({
+        purchase_id: (purchase as any).id,
+        ingredient_id: it.ingredient_id,
+        qty: it.qty,
+        unit_price: it.unit_price,
+        subtotal: it.subtotal,
+      });
+      if (itErr) return { ok: false, error: `No pude guardar item: ${itErr.message}` };
+
+      // Aumentar stock + inventory_movement
+      const { data: curr } = await supabase
+        .from("ingredients")
+        .select("current_stock")
+        .eq("id", it.ingredient_id)
+        .maybeSingle();
+      const newBalance = Number((curr as any)?.current_stock ?? 0) + it.qty;
+      await supabase.from("inventory_movements").insert({
+        business_id: ctx.business.id,
+        ingredient_id: it.ingredient_id,
+        type: "purchase",
+        qty_delta: it.qty,
+        balance_after: newBalance,
+        unit_cost: it.unit_price,
+        related_purchase_id: (purchase as any).id,
+      });
+      await supabase
+        .from("ingredients")
+        .update({ current_stock: newBalance, last_unit_cost: it.unit_price })
+        .eq("id", it.ingredient_id);
+
+      // Historial de precios
+      await supabase.from("price_history").insert({
+        business_id: ctx.business.id,
+        ingredient_id: it.ingredient_id,
+        unit_price: it.unit_price,
+        source: "purchase",
+        related_purchase_id: (purchase as any).id,
+      });
+    }
+
+    // Notificación al owner si seller != owner (mismo patrón que register_sale)
+    const sellerIsOwner = ctx.user.id === ctx.business.owner_user_id;
+    let owner_notified = false;
+    if (!sellerIsOwner) {
+      try {
+        const { data: owner } = await supabase
+          .from("users")
+          .select("phone, name")
+          .eq("id", ctx.business.owner_user_id)
+          .maybeSingle();
+        if (owner && (owner as any).phone) {
+          const sellerName = ctx.user.name ?? ctx.user.phone;
+          const linesText = resolved
+            .map((it) => `📦 ${it.qty} ${it.unit} de ${it.ingredient_name} — $${formatCop(it.subtotal)}`)
+            .join("\n");
+          const note = `🧾 *Nueva compra registrada por ${sellerName}*\n${linesText}\nTotal: $${formatCop(total)}${input.vendor_name ? ` — ${input.vendor_name}` : ""}`;
+          await sendWhatsAppText((owner as any).phone, note);
+          owner_notified = true;
+          await supabase.from("messages").insert({
+            business_id: ctx.business.id,
+            user_id: ctx.business.owner_user_id,
+            direction: "outbound",
+            content_type: "text",
+            raw_text: note,
+            tool_calls: { kind: "purchase_notification", purchase_id: (purchase as any).id },
+          });
+        }
+      } catch (err) {
+        log.error("owner_purchase_notification_failed", { err: String(err) });
+      }
+    }
+
+    return {
+      ok: true,
+      data: {
+        purchase_id: (purchase as any).id,
+        total,
+        vendor_name: input.vendor_name ?? null,
+        items: resolved.map((it) => ({
+          name: it.ingredient_name,
+          qty: it.qty,
+          unit: it.unit,
+          unit_price: it.unit_price,
+          subtotal: it.subtotal,
+          was_created: it.was_created,
+        })),
+        owner_notified,
+        seller_is_owner: sellerIsOwner,
+      },
+    };
+  },
+};
+
+// =========================================================================
+// 11. correct_last_sale  (vendedor + dueño)
 // =========================================================================
 const correctLastSale: ToolDef = {
   allowedRoles: ["owner", "seller"],
@@ -835,6 +1063,7 @@ const correctLastSale: ToolDef = {
 export const PRODUCTION_TOOLS: Record<string, ToolDef> = {
   register_sale: registerSale,
   correct_last_sale: correctLastSale,
+  register_purchase: registerPurchase,
   query_inventory: queryInventory,
   list_catalog: listCatalog,
   update_product: updateProduct,
