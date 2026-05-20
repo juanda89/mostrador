@@ -806,7 +806,7 @@ const correctLastSale: ToolDef = {
       await supabase.from("sales").update(update).eq("id", sale.id);
     }
 
-    // Audit
+    // Audit: registrar la corrección en sale_corrections con before/after.
     await supabase.from("sale_corrections").insert({
       sale_id: sale.id,
       corrected_by_user_id: ctx.user.id,
@@ -816,8 +816,11 @@ const correctLastSale: ToolDef = {
       source_message_id: ctx.inboundMessageId,
     });
 
-    // Marcar la venta como corregida
-    await supabase.from("sales").update({ status: "corrected" }).eq("id", sale.id);
+    // IMPORTANTE: la venta sigue siendo 'active' incluso después de corregida.
+    // El status='corrected' solo se usa cuando una venta es DESCARTADA (no aplica
+    // a ediciones). Si la marcáramos como 'corrected' aquí, correct_last_sale no
+    // la encontraría en correcciones subsecuentes — bug que vimos en producción.
+    // El audit completo del cambio queda en sale_corrections.
 
     return {
       ok: true,
