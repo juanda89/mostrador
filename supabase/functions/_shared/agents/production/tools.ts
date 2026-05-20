@@ -6,7 +6,31 @@ import { log } from "../../lib/log.ts";
 import { toE164 } from "../../lib/phone.ts";
 import { matchPaymentMethod } from "../../lib/fuzzy.ts";
 import { computeIngredientUsage } from "../../lib/inventory-calc.ts";
+import { sendWhatsAppText } from "../../lib/whatsapp.ts";
 import type { Business, User } from "../../types/domain.ts";
+
+const EMOJI_BY_PRODUCT_HINT: Array<[RegExp, string]> = [
+  [/hambur/i, "🍔"],
+  [/perro|hot ?dog|salchich/i, "🌭"],
+  [/empanad/i, "🥟"],
+  [/pizza/i, "🍕"],
+  [/taco/i, "🌮"],
+  [/burrito/i, "🌯"],
+  [/sandwich|sándwich/i, "🥪"],
+  [/papas|salchipap|french/i, "🍟"],
+  [/crispet|palom/i, "🍿"],
+  [/pollo/i, "🍗"],
+  [/gaseosa|coca|bebid|jugo|agua/i, "🥤"],
+  [/caf[eé]/i, "☕"],
+  [/helado/i, "🍦"],
+  [/postre|torta/i, "🍰"],
+  [/ensalad/i, "🥗"],
+];
+
+function emojiFor(name: string): string {
+  for (const [re, emoji] of EMOJI_BY_PRODUCT_HINT) if (re.test(name)) return emoji;
+  return "🍽️";
+}
 
 export interface ProductionToolCtx {
   user: User;
@@ -246,6 +270,41 @@ const registerSale: ToolDef = {
       }
     }
 
+    // Notificación proactiva al owner si el seller que vendió NO es el owner.
+    // Si es el mismo dueño (común cuando opera solo), saltamos la notificación
+    // para no ruidearlo con su propia venta.
+    const sellerIsOwner = ctx.user.id === ctx.business.owner_user_id;
+    let owner_notified = false;
+    if (!sellerIsOwner) {
+      try {
+        const { data: owner } = await supabase
+          .from("users")
+          .select("phone, name")
+          .eq("id", ctx.business.owner_user_id)
+          .maybeSingle();
+        if (owner && (owner as any).phone) {
+          const sellerName = ctx.user.name ?? ctx.user.phone;
+          const lines = itemsResolved.map((it) =>
+            `${emojiFor(it.product_name)} ${it.qty} ${it.product_name} — $${formatCop(it.subtotal)}`
+          ).join("\n");
+          const note = `💸 *Nueva venta de ${sellerName}*\n${lines}\nTotal: $${formatCop(total)} — ${paymentMethod}`;
+          await sendWhatsAppText((owner as any).phone, note);
+          owner_notified = true;
+          // Persistir el outbound de notificación
+          await supabase.from("messages").insert({
+            business_id: ctx.business.id,
+            user_id: ctx.business.owner_user_id,
+            direction: "outbound",
+            content_type: "text",
+            raw_text: note,
+            tool_calls: { kind: "sale_notification", sale_id: (sale as any).id },
+          });
+        }
+      } catch (err) {
+        log.error("owner_notification_failed", { err: String(err), sale_id: (sale as any).id });
+      }
+    }
+
     return {
       ok: true,
       data: {
@@ -258,10 +317,16 @@ const registerSale: ToolDef = {
           subtotal: it.subtotal,
         })),
         low_stock_alerts: lowStockAlerts,
+        owner_notified,
+        seller_is_owner: sellerIsOwner,
       },
     };
   },
 };
+
+function formatCop(n: number): string {
+  return Math.round(n).toLocaleString("es-CO");
+}
 
 // =========================================================================
 // 2. query_inventory

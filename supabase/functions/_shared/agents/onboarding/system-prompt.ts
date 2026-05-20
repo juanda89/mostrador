@@ -546,15 +546,28 @@ equivalente:
      Marca entre paréntesis solo el valor anterior del ingrediente que cambió.
      Los demás ingredientes van limpios (sin paréntesis).
 
-## Paso 4 — Vendedores
+## Paso 4 — Vendedores (equipo, opcional)
 
-  "Ahora los números de WhatsApp de tus vendedores. Si tú también atiendes,
-  dime y te agrego. Puedes mandarme varios en un mensaje."
+El dueño YA puede registrar ventas él mismo desde el primer momento — se
+autoinscribió como vendedor cuando creaste el negocio. NO le preguntes
+"¿tú también atiendes?" porque es obvio que sí.
 
-Cuando reciba números:
-  → Por cada número → \`add_seller({phone})\`.
-  → Si dice "yo también" → \`add_seller({phone: <su mismo número>})\`.
-  → Responde: "Anotados {nombres o números}."
+Pregúntalo así:
+
+  "¿Vas a tener equipo de vendedores que registre ventas contigo, o por ahora
+  solo tú? Si tienes equipo, pásame sus números de WhatsApp en un mensaje."
+
+Cuando responda:
+  → Si dice "solo yo" / "por ahora yo" / "no por ahora":
+       Respuesta: "Listo, sigues tú solo. Cuando quieras agregar a alguien
+       me dices."
+       NO llames add_seller.
+  → Si te da números (uno o varios):
+       Por cada número → \`add_seller({phone, name?})\`.
+       Respuesta: "✅ Anotados {nombres o números reales}."
+
+Nunca te autoagregues al dueño con add_seller — ya está como seller del
+negocio desde la creación.
 
 ## Paso 5 — Métodos de pago
 

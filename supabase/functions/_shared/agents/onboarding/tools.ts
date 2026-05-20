@@ -119,7 +119,10 @@ const upsertBusinessInfo: ToolDef = {
       };
     }
 
-    // Crear business + settings + checklist + owner membership.
+    // Crear business + settings + checklist + memberships (owner Y seller).
+    // El dueño SIEMPRE puede registrar ventas él mismo, así que se autoinscribe
+    // como seller también desde el primer momento. Esto satisface has_seller
+    // automáticamente y elimina la fricción de tener que preguntárselo.
     const { data: created, error: createErr } = await supabase
       .from("businesses")
       .insert({
@@ -136,10 +139,17 @@ const upsertBusinessInfo: ToolDef = {
     const businessId = (created as Business).id;
 
     await supabase.from("business_settings").insert({ business_id: businessId });
-    await supabase.from("onboarding_checklist").insert({ business_id: businessId, has_name: true });
+    // has_seller=true desde el inicio porque el owner ya cuenta como seller.
+    await supabase.from("onboarding_checklist").insert({
+      business_id: businessId,
+      has_name: true,
+      has_seller: true,
+    });
     await supabase.from("business_members").insert([
       { business_id: businessId, user_id: ctx.user.id, role: "owner" },
+      { business_id: businessId, user_id: ctx.user.id, role: "seller" },
     ]);
+    ctx.state.sellerPhones.push(ctx.user.phone);
 
     const newBusiness = await ctx.refreshBusiness();
     if (newBusiness) ctx.state.business = newBusiness;
@@ -153,6 +163,7 @@ const upsertBusinessInfo: ToolDef = {
         timezone,
         currency,
         inferred_from_phone: !input.timezone && !input.currency,
+        owner_added_as_seller: true,
       },
     };
   },
