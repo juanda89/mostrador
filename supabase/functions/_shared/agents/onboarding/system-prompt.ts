@@ -545,12 +545,18 @@ Si dice sí ("dale", "claro", "listo", "obvio", "ok"):
        - Cocción/base estructural (mantequilla en crispetas, salsa de tomate
          base de pizza).
 
-     ❌ NO incluyas SALSAS NI CONDIMENTOS OPCIONALES que se agregan al
-        servir o el cliente pide aparte:
+     ❌ NO incluyas SALSAS, CONDIMENTOS, NI CONSUMIBLES A GRANEL que se
+        usan en cantidades mínimas por porción:
        - Ketchup, mostaza, mayonesa, salsa rosada
        - Ají, hogao, chimichurri, salsa de la casa
        - Salsa de ajo, BBQ, picante
        - Especias decorativas (orégano espolvoreado)
+       - *Sal*
+       - *Azúcar*
+       - Pimienta, comino y especias en pizca
+
+       (estos consumibles se compran 1 vez cada mucho tiempo, su costo por
+       venta es ínfimo y son ruido en el inventario diario)
 
      Ejemplos de la regla aplicada:
        Hamburguesa  → carne, pan, queso, lechuga, tomate, cebolla
@@ -563,8 +569,12 @@ Si dice sí ("dale", "claro", "listo", "obvio", "ok"):
                         (la salsa de tomate ES base estructural; sí incluye)
        Salchipapa   → papa, salchicha, queso rallado
                       (NO salsas adicionales)
-       Crispetas    → maíz, mantequilla, sal
-                      (sal es parte estructural del sabor base)
+       Crispetas    → maíz, mantequilla
+                      (NO sal ni azúcar)
+       Café         → granos de café, leche (si lleva)
+                      (NO azúcar — eso lo agrega el cliente)
+       Jugo natural → fruta principal, agua (o leche si es batido)
+                      (NO azúcar)
 
      Regla práctica: 4-6 ingredientes típicos por producto.
      Si el producto realmente es simple (ej. gaseosa, agua), 1-2 está bien.
