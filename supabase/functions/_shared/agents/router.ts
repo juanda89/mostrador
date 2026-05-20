@@ -11,6 +11,7 @@ import { sendWhatsAppText, fetchKapsoMedia } from "../lib/whatsapp.ts";
 import { transcribeAudio } from "../media/whisper.ts";
 import { extractMenu } from "../media/gemini.ts";
 import { runOnboardingAgent } from "./onboarding/agent.ts";
+import { runProductionAgent } from "./production/agent.ts";
 import type {
   Business,
   ContentType,
@@ -639,17 +640,22 @@ async function route(args: RouteArgs): Promise<RouteResult> {
     return { text: "Tu número no está asociado a ningún negocio. Pídele al dueño que te agregue." };
   }
 
-  // CASO 3: Producción.
-  // STUB temporal: el production agent (Fase 3 del plan) está en backlog.
-  // Mientras tanto respondemos con un mensaje honesto, no con un eco debug.
-  if (isOwner) {
-    return {
-      text: "Tu negocio ya está activo. Estoy terminando de habilitar el reporte de ventas y las notificaciones — te aviso cuando estén listas. Mientras tanto, cualquier duda dime.",
-    };
+  // CASO 3: Producción. Dispatch al production agent con el rol correspondiente.
+  // Si la persona es ambos owner Y seller (autoagregada), priorizamos OWNER
+  // porque tiene más permisos (puede hacer todo lo del seller + modificaciones).
+  if (isOwner || isSeller) {
+    const role: "owner" | "seller" = isOwner ? "owner" : "seller";
+    const result = await runProductionAgent({
+      user,
+      business,
+      role,
+      inboundMessage,
+      userText,
+    });
+    return { text: result.text, traces: result.traces };
   }
-  return {
-    text: "Tu negocio ya está activo. Estoy terminando de habilitar el reporte de ventas; pronto podrás registrar las tuyas hablándome.",
-  };
+
+  return { text: "Tu número no está asociado a ningún negocio." };
 }
 
 /**
