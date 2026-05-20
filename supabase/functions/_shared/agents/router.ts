@@ -301,15 +301,73 @@ async function handleResetCommand(fromPhone: string, wamid: string): Promise<voi
 
   log.info("reset_command_received", { user_id: user.id, phone });
 
-  // Borrar en el orden correcto (FKs):
-  //   1. messages (FK a users)
-  //   2. business_members (FK a users)
-  //   3. businesses (ON DELETE CASCADE limpia settings, checklist, products,
-  //                  ingredients, locations, etc.)
-  //   4. users.name → NULL (no borramos el row, solo el nombre)
+  // Encontrar los negocios del usuario antes de borrar.
+  const { data: businesses } = await supabase
+    .from("businesses")
+    .select("id")
+    .eq("owner_user_id", user.id);
+  const businessIds = (businesses ?? []).map((b: any) => b.id);
+
+  // Borrar mensajes del user (no dependen de business).
   await supabase.from("messages").delete().eq("user_id", user.id);
-  await supabase.from("business_members").delete().eq("user_id", user.id);
-  await supabase.from("businesses").delete().eq("owner_user_id", user.id);
+
+  if (businessIds.length > 0) {
+    // Borrar en orden inverso de FKs RESTRICT.
+    // Tablas hijas RESTRICT que rompen el cascade si no se borran primero:
+    //   - product_components.child_product_id (RESTRICT)
+    //   - product_recipes.{product_id,ingredient_id} (RESTRICT)
+    //   - sale_items.product_id (RESTRICT)
+    //   - purchase_items.ingredient_id (RESTRICT)
+    //   - inventory_movements.ingredient_id (RESTRICT)
+    //   - price_history.ingredient_id (RESTRICT)
+    const { data: productIds } = await supabase
+      .from("products")
+      .select("id")
+      .in("business_id", businessIds);
+    const pids = (productIds ?? []).map((p: any) => p.id);
+
+    const { data: saleIds } = await supabase
+      .from("sales")
+      .select("id")
+      .in("business_id", businessIds);
+    const sids = (saleIds ?? []).map((s: any) => s.id);
+
+    const { data: purchaseIds } = await supabase
+      .from("purchases")
+      .select("id")
+      .in("business_id", businessIds);
+    const purIds = (purchaseIds ?? []).map((p: any) => p.id);
+
+    // Borrar nietos primero, después hijos, después padres
+    await supabase.from("inventory_movements").delete().in("business_id", businessIds);
+    await supabase.from("price_history").delete().in("business_id", businessIds);
+    if (sids.length > 0) {
+      await supabase.from("sale_corrections").delete().in("sale_id", sids);
+      await supabase.from("sale_items").delete().in("sale_id", sids);
+    }
+    if (purIds.length > 0) {
+      await supabase.from("purchase_items").delete().in("purchase_id", purIds);
+    }
+    await supabase.from("sales").delete().in("business_id", businessIds);
+    await supabase.from("purchases").delete().in("business_id", businessIds);
+    if (pids.length > 0) {
+      await supabase.from("product_recipes").delete().in("product_id", pids);
+      // product_components: borrar por parent O por child
+      await supabase.from("product_components").delete().in("parent_product_id", pids);
+      await supabase.from("product_components").delete().in("child_product_id", pids);
+    }
+    await supabase.from("products").delete().in("business_id", businessIds);
+    await supabase.from("ingredients").delete().in("business_id", businessIds);
+    await supabase.from("business_members").delete().in("business_id", businessIds);
+    // Las cascade-OK (settings, checklist, locations, shifts, report_logs)
+    // se limpian al borrar businesses.
+    await supabase.from("businesses").delete().in("id", businessIds);
+  } else {
+    // Sin negocios, solo limpiar memberships sueltos.
+    await supabase.from("business_members").delete().eq("user_id", user.id);
+  }
+
+  // Limpiar nombre del user (el row sobrevive).
   await supabase.from("users").update({ name: null }).eq("id", user.id);
 
   // Mandar confirmación + nuevo saludo
