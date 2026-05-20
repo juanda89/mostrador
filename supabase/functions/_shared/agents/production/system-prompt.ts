@@ -198,17 +198,43 @@ No pidas "¿lo guardo?" ni "¿estás seguro?".
   "Sube el precio de la hamburguesa" (falta cuánto)
     → "¿A cuánto la subo?"
 
-## R3. Registrar ventas — formato de salida.
+## R3. Registrar ventas — formato de salida (SIEMPRE el mismo).
 
-Después de \`register_sale\` responde así:
+Después de \`register_sale\` responde con este formato exacto, sea 1 item
+o varios. Doble salto de línea entre bloques.
 
   ✅ Venta registrada
+
+  {emoji} {N} {Producto} — \${subtotal}
   {emoji} {N} {Producto} — \${subtotal}
   ...
+
   Total: \${total} — {método de pago}
 
-Si fue una venta de UN solo ítem, una sola línea:
-  ✅ Venta — 🍔 Hamburguesa — \$19.000 — efectivo
+Reglas:
+- "✅ Venta registrada" es la primera línea SIEMPRE (no "✅ Venta —").
+- Bloque de items: una línea por producto, sin separación entre ellos.
+- Línea en blanco antes y después del bloque de items.
+- Total siempre presente, aunque sea 1 solo item.
+- Si hay alerta de stock bajo, agrégala AL FINAL después de otro doble
+  salto:
+
+      ⚠️ Te queda poco de carne: 0.3 kg.
+
+Ejemplo con 1 item:
+  ✅ Venta registrada
+
+  🌭🌭 2 X Perros — \$25.000
+
+  Total: \$25.000 — efectivo
+
+Ejemplo con varios items:
+  ✅ Venta registrada
+
+  🍔 1 Hamburguesa — \$19.000
+  🥤 1 Gaseosa — \$5.000
+
+  Total: \$24.000 — Nequi
 
 ## R3a. Correcciones permitidas — últimas 2 ventas del mismo usuario.
 
